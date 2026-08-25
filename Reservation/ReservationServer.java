@@ -28,7 +28,7 @@ public class ReservationServer extends UnicastRemoteObject
             ChargingStationInterface chargingStation)
             throws RemoteException {
 
-        super();
+        super(2235);
 
         reservations = new HashMap<>();
         reservationPorts = new HashMap<>();
@@ -436,21 +436,51 @@ public class ReservationServer extends UnicastRemoteObject
 
         try {
 
+            String rmiHost = System.getenv("RMI_SERVER_HOST");
+            if (rmiHost != null && !rmiHost.trim().isEmpty()) {
+                System.setProperty("java.rmi.server.hostname", rmiHost);
+            }
+
             // -------------------------------------------------
             // Connect to ChargingStationServer
             // -------------------------------------------------
 
-            ChargingStationInterface chargingStation;
+            String stationUrl = System.getenv("STATION_URL");
+            if (stationUrl == null || stationUrl.trim().isEmpty()) {
+                String stationHost = System.getenv("STATION_HOST");
+                if (stationHost == null || stationHost.trim().isEmpty()) {
+                    stationHost = "localhost";
+                }
+                stationUrl = "rmi://" + stationHost + ":1234//ChargingStationServer";
+            }
 
-            try {
+            ChargingStationInterface chargingStation = null;
+            int maxRetries = 10;
+            int retryCount = 0;
 
-                chargingStation =
-                        (ChargingStationInterface)
-                        Naming.lookup(
-                                "rmi://localhost:1234//ChargingStationServer"
-                        );
+            System.out.println("Connecting to ChargingStationServer at " + stationUrl + "...");
 
-            } catch (Exception e) {
+            while (retryCount < maxRetries) {
+                try {
+                    chargingStation =
+                            (ChargingStationInterface)
+                            Naming.lookup(stationUrl);
+                    System.out.println("ChargingStationServer connected.");
+                    break;
+                } catch (Exception e) {
+                    retryCount++;
+                    System.out.println("Waiting for ChargingStationServer...");
+                    System.out.println("Retry " + retryCount + "/" + maxRetries + "...");
+                    try {
+                        Thread.sleep(2000);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                }
+            }
+
+            if (chargingStation == null) {
 
                 System.out.println(
                         "Could not connect to "

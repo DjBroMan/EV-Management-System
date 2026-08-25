@@ -33,7 +33,7 @@ public class ChargingSessionServer
             ChargingStationInterface chargingStation)
             throws RemoteException {
 
-        super();
+        super(2236);
 
         reservationSessions =
                 new HashMap<String, String>();
@@ -575,21 +575,51 @@ public class ChargingSessionServer
 
         try {
 
+            String rmiHost = System.getenv("RMI_SERVER_HOST");
+            if (rmiHost != null && !rmiHost.trim().isEmpty()) {
+                System.setProperty("java.rmi.server.hostname", rmiHost);
+            }
+
             // -------------------------------------------------
             // Connect to ChargingStationServer
             // -------------------------------------------------
 
-            ChargingStationInterface chargingStation;
+            String stationUrl = System.getenv("STATION_URL");
+            if (stationUrl == null || stationUrl.trim().isEmpty()) {
+                String stationHost = System.getenv("STATION_HOST");
+                if (stationHost == null || stationHost.trim().isEmpty()) {
+                    stationHost = "localhost";
+                }
+                stationUrl = "rmi://" + stationHost + ":1234//ChargingStationServer";
+            }
 
-            try {
+            ChargingStationInterface chargingStation = null;
+            int maxRetries = 10;
+            int retryCount = 0;
 
-                chargingStation =
-                        (ChargingStationInterface)
-                        Naming.lookup(
-                                "rmi://localhost:1234//ChargingStationServer"
-                        );
+            System.out.println("Connecting to ChargingStationServer at " + stationUrl + "...");
 
-            } catch (Exception e) {
+            while (retryCount < maxRetries) {
+                try {
+                    chargingStation =
+                            (ChargingStationInterface)
+                            Naming.lookup(stationUrl);
+                    System.out.println("ChargingStationServer connected.");
+                    break;
+                } catch (Exception e) {
+                    retryCount++;
+                    System.out.println("Waiting for ChargingStationServer...");
+                    System.out.println("Retry " + retryCount + "/" + maxRetries + "...");
+                    try {
+                        Thread.sleep(2000);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                }
+            }
+
+            if (chargingStation == null) {
 
                 System.out.println(
                         "Could not connect to "
@@ -608,17 +638,41 @@ public class ChargingSessionServer
             // Connect to ReservationServer
             // -------------------------------------------------
 
-            ReservationInterface reservationServer;
+            String reservationUrl = System.getenv("RESERVATION_URL");
+            if (reservationUrl == null || reservationUrl.trim().isEmpty()) {
+                String resHost = System.getenv("RESERVATION_HOST");
+                if (resHost == null || resHost.trim().isEmpty()) {
+                    resHost = "localhost";
+                }
+                reservationUrl = "rmi://" + resHost + ":1235/ReservationService";
+            }
 
-            try {
+            ReservationInterface reservationServer = null;
+            retryCount = 0;
 
-                reservationServer =
-                        (ReservationInterface)
-                        Naming.lookup(
-                                "rmi://localhost:1235/ReservationService"
-                        );
+            System.out.println("Connecting to ReservationServer at " + reservationUrl + "...");
 
-            } catch (Exception e) {
+            while (retryCount < maxRetries) {
+                try {
+                    reservationServer =
+                            (ReservationInterface)
+                            Naming.lookup(reservationUrl);
+                    System.out.println("ReservationServer connected.");
+                    break;
+                } catch (Exception e) {
+                    retryCount++;
+                    System.out.println("Waiting for ReservationServer...");
+                    System.out.println("Retry " + retryCount + "/" + maxRetries + "...");
+                    try {
+                        Thread.sleep(2000);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                }
+            }
+
+            if (reservationServer == null) {
 
                 System.out.println(
                         "Could not connect to "

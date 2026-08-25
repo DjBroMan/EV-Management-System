@@ -32,7 +32,7 @@ public class PaymentServer
             ChargingStationInterface chargingStation)
             throws RemoteException {
 
-        super();
+        super(2237);
 
         paymentStatus =
                 new HashMap<String, String>();
@@ -439,22 +439,51 @@ public class PaymentServer
 
         try {
 
+            String rmiHost = System.getenv("RMI_SERVER_HOST");
+            if (rmiHost != null && !rmiHost.trim().isEmpty()) {
+                System.setProperty("java.rmi.server.hostname", rmiHost);
+            }
+
             // -------------------------------------------------
             // Connect to ChargingStationServer
             // -------------------------------------------------
 
-            ChargingStationInterface chargingStation;
-
-            try {
-
-                chargingStation =
-                        (ChargingStationInterface)
-                        Naming.lookup(
-                                "rmi://localhost:1234//ChargingStationServer"
-                        );
-
+            String stationUrl = System.getenv("STATION_URL");
+            if (stationUrl == null || stationUrl.trim().isEmpty()) {
+                String stationHost = System.getenv("STATION_HOST");
+                if (stationHost == null || stationHost.trim().isEmpty()) {
+                    stationHost = "localhost";
+                }
+                stationUrl = "rmi://" + stationHost + ":1234//ChargingStationServer";
             }
-            catch (Exception e) {
+
+            ChargingStationInterface chargingStation = null;
+            int maxRetries = 10;
+            int retryCount = 0;
+
+            System.out.println("Connecting to ChargingStationServer at " + stationUrl + "...");
+
+            while (retryCount < maxRetries) {
+                try {
+                    chargingStation =
+                            (ChargingStationInterface)
+                            Naming.lookup(stationUrl);
+                    System.out.println("ChargingStationServer connected.");
+                    break;
+                } catch (Exception e) {
+                    retryCount++;
+                    System.out.println("Waiting for ChargingStationServer...");
+                    System.out.println("Retry " + retryCount + "/" + maxRetries + "...");
+                    try {
+                        Thread.sleep(2000);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                }
+            }
+
+            if (chargingStation == null) {
 
                 System.out.println(
                         "Could not connect to "
@@ -473,18 +502,41 @@ public class PaymentServer
             // Connect to ChargingSessionServer
             // -------------------------------------------------
 
-            ChargingSessionInterface chargingSession;
-
-            try {
-
-                chargingSession =
-                        (ChargingSessionInterface)
-                        Naming.lookup(
-                                "rmi://localhost:1236/ChargingSessionServer"
-                        );
-
+            String sessionUrl = System.getenv("SESSION_URL");
+            if (sessionUrl == null || sessionUrl.trim().isEmpty()) {
+                String sessHost = System.getenv("SESSION_HOST");
+                if (sessHost == null || sessHost.trim().isEmpty()) {
+                    sessHost = "localhost";
+                }
+                sessionUrl = "rmi://" + sessHost + ":1236/ChargingSessionServer";
             }
-            catch (Exception e) {
+
+            ChargingSessionInterface chargingSession = null;
+            retryCount = 0;
+
+            System.out.println("Connecting to ChargingSessionServer at " + sessionUrl + "...");
+
+            while (retryCount < maxRetries) {
+                try {
+                    chargingSession =
+                            (ChargingSessionInterface)
+                            Naming.lookup(sessionUrl);
+                    System.out.println("ChargingSessionServer connected.");
+                    break;
+                } catch (Exception e) {
+                    retryCount++;
+                    System.out.println("Waiting for ChargingSessionServer...");
+                    System.out.println("Retry " + retryCount + "/" + maxRetries + "...");
+                    try {
+                        Thread.sleep(2000);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                }
+            }
+
+            if (chargingSession == null) {
 
                 System.out.println(
                         "Could not connect to "
@@ -503,18 +555,41 @@ public class PaymentServer
             // Connect to PricingServer
             // -------------------------------------------------
 
-            PricingInterface pricing;
-
-            try {
-
-                pricing =
-                        (PricingInterface)
-                        Naming.lookup(
-                                "rmi://localhost:1238/PricingService"
-                        );
-
+            String pricingUrl = System.getenv("PRICING_URL");
+            if (pricingUrl == null || pricingUrl.trim().isEmpty()) {
+                String prHost = System.getenv("PRICING_HOST");
+                if (prHost == null || prHost.trim().isEmpty()) {
+                    prHost = "localhost";
+                }
+                pricingUrl = "rmi://" + prHost + ":1238/PricingService";
             }
-            catch (Exception e) {
+
+            PricingInterface pricing = null;
+            retryCount = 0;
+
+            System.out.println("Connecting to PricingServer at " + pricingUrl + "...");
+
+            while (retryCount < maxRetries) {
+                try {
+                    pricing =
+                            (PricingInterface)
+                            Naming.lookup(pricingUrl);
+                    System.out.println("PricingServer connected.");
+                    break;
+                } catch (Exception e) {
+                    retryCount++;
+                    System.out.println("Waiting for PricingServer...");
+                    System.out.println("Retry " + retryCount + "/" + maxRetries + "...");
+                    try {
+                        Thread.sleep(2000);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                }
+            }
+
+            if (pricing == null) {
 
                 System.out.println(
                         "Could not connect to PricingServer."

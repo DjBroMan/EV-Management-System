@@ -23,6 +23,24 @@ public class EVClient {
 
     public static void main(String[] args) {
 
+        try {
+            java.rmi.server.RMISocketFactory.setSocketFactory(new java.rmi.server.RMISocketFactory() {
+                @Override
+                public java.net.Socket createSocket(String host, int port) throws java.io.IOException {
+                    if ("charging-station".equals(host) || "reservation".equals(host) ||
+                        "charging-session".equals(host) || "pricing".equals(host) ||
+                        "payment".equals(host)) {
+                        host = "localhost";
+                    }
+                    return new java.net.Socket(host, port);
+                }
+                @Override
+                public java.net.ServerSocket createServerSocket(int port) throws java.io.IOException {
+                    return new java.net.ServerSocket(port);
+                }
+            });
+        } catch (Exception ignored) {}
+
         Scanner sc = new Scanner(System.in);
 
         System.out.println("========================================");
@@ -100,33 +118,38 @@ public class EVClient {
     // is picked up without restarting EVClient)
     // ---------------------------------------------------------------
 
+    private static String getEnvHost(String envVar, String defaultHost) {
+        String host = System.getenv(envVar);
+        return (host != null && !host.trim().isEmpty()) ? host.trim() : defaultHost;
+    }
+
     private static ChargingStationInterface lookupChargingStation() throws Exception {
         return (ChargingStationInterface) Naming.lookup(
-                "rmi://localhost:1234//ChargingStationServer"
+                "rmi://" + getEnvHost("STATION_HOST", "localhost") + ":1234//ChargingStationServer"
         );
     }
 
     private static ReservationInterface lookupReservation() throws Exception {
         return (ReservationInterface) Naming.lookup(
-                "rmi://localhost:1235/ReservationService"
+                "rmi://" + getEnvHost("RESERVATION_HOST", "localhost") + ":1235/ReservationService"
         );
     }
 
     private static ChargingSessionInterface lookupChargingSession() throws Exception {
         return (ChargingSessionInterface) Naming.lookup(
-                "rmi://localhost:1236/ChargingSessionServer"
+                "rmi://" + getEnvHost("SESSION_HOST", "localhost") + ":1236/ChargingSessionServer"
         );
     }
 
     private static PaymentInterface lookupPayment() throws Exception {
         return (PaymentInterface) Naming.lookup(
-                "rmi://localhost:1237/PaymentServer"
+                "rmi://" + getEnvHost("PAYMENT_HOST", "localhost") + ":1237/PaymentServer"
         );
     }
 
     private static PricingInterface lookupPricing() throws Exception {
         return (PricingInterface) Naming.lookup(
-                "rmi://localhost:1238/PricingService"
+                "rmi://" + getEnvHost("PRICING_HOST", "localhost") + ":1238/PricingService"
         );
     }
 

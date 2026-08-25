@@ -13,7 +13,7 @@ public class ChargingStationServer
 
     public ChargingStationServer() throws RemoteException
     {
-        super();
+        super(2234);
     }
 
     // =========================================================
@@ -343,6 +343,12 @@ public class ChargingStationServer
     {
         try
         {
+            String rmiHost = System.getenv("RMI_SERVER_HOST");
+            if (rmiHost != null && !rmiHost.trim().isEmpty())
+            {
+                System.setProperty("java.rmi.server.hostname", rmiHost);
+            }
+
             final String HOST =
                     "rmi://localhost:1234//ChargingStationServer";
 

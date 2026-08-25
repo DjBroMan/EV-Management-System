@@ -19,7 +19,7 @@ public class PricingServer extends UnicastRemoteObject
 
     // Constructor
     protected PricingServer() throws RemoteException {
-        super();
+        super(2238);
 
         stationDemand = new HashMap<>();
 
@@ -270,6 +270,11 @@ public class PricingServer extends UnicastRemoteObject
     public static void main(String[] args) {
 
         try {
+
+            String rmiHost = System.getenv("RMI_SERVER_HOST");
+            if (rmiHost != null && !rmiHost.trim().isEmpty()) {
+                System.setProperty("java.rmi.server.hostname", rmiHost);
+            }
 
             System.out.println(
                     "Starting Pricing Server..."

@@ -31,20 +31,43 @@ public class MultithreadTest {
     // Number of simulated EVs
     private static final int NUMBER_OF_EV_REQUESTS = 10;
 
+    private static String getEnvHost(String envVar, String defaultHost) {
+        String host = System.getenv(envVar);
+        return (host != null && !host.trim().isEmpty()) ? host.trim() : defaultHost;
+    }
+
     // RMI service locations
     private static final String RESERVATION_URL =
-            "rmi://localhost:1235/ReservationService";
+            "rmi://" + getEnvHost("RESERVATION_HOST", "localhost") + ":1235/ReservationService";
 
     private static final String SESSION_URL =
-            "rmi://localhost:1236/ChargingSessionServer";
+            "rmi://" + getEnvHost("SESSION_HOST", "localhost") + ":1236/ChargingSessionServer";
 
     private static final String PAYMENT_URL =
-            "rmi://localhost:1237/PaymentServer";
+            "rmi://" + getEnvHost("PAYMENT_HOST", "localhost") + ":1237/PaymentServer";
 
     private static final String PRICING_URL =
-            "rmi://localhost:1238/PricingService";
+            "rmi://" + getEnvHost("PRICING_HOST", "localhost") + ":1238/PricingService";
 
     public static void main(String[] args) {
+
+        try {
+            java.rmi.server.RMISocketFactory.setSocketFactory(new java.rmi.server.RMISocketFactory() {
+                @Override
+                public java.net.Socket createSocket(String host, int port) throws java.io.IOException {
+                    if ("charging-station".equals(host) || "reservation".equals(host) ||
+                        "charging-session".equals(host) || "pricing".equals(host) ||
+                        "payment".equals(host)) {
+                        host = "localhost";
+                    }
+                    return new java.net.Socket(host, port);
+                }
+                @Override
+                public java.net.ServerSocket createServerSocket(int port) throws java.io.IOException {
+                    return new java.net.ServerSocket(port);
+                }
+            });
+        } catch (Exception ignored) {}
 
         System.out.println(
                 "============================================================"
