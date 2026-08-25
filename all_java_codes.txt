@@ -1,0 +1,4015 @@
+============================================================
+             EV CHARGING NETWORK - JAVA CODES
+============================================================
+
+============================================================
+ChargingSessionInterface.java
+============================================================
+
+import java.rmi.*;
+
+// Remote interface for managing charging sessions
+public interface ChargingSessionInterface extends Remote {
+
+    // Start a charging session using a reservation ID
+    String startCharging(String reservationId) throws RemoteException;
+
+    // Stop an active charging session
+    String stopCharging(String sessionId) throws RemoteException;
+
+    // Get current status of a session
+    String getSessionStatus(String sessionId) throws RemoteException;
+
+    // Get energy consumed (kWh) for a session as a number.
+    // Used by PaymentServer to calculate the final price. Returns -1 if not found.
+    double getEnergyConsumed(String sessionId) throws RemoteException;
+
+    // Get charging port ID associated with a session.
+    // Used by PaymentServer to release the port after successful payment.
+    String getSessionPort(String sessionId) throws RemoteException;
+}
+
+============================================================
+ChargingSessionServer.java
+============================================================
+
+import java.rmi.*;
+import java.rmi.server.*;
+import java.rmi.registry.*;
+import java.util.HashMap;
+
+// RMI Server class that implements the ChargingSessionInterface
+public class ChargingSessionServer
+        extends UnicastRemoteObject
+        implements ChargingSessionInterface {
+
+    // Stores reservation ID -> session ID
+    private HashMap<String, String> reservationSessions;
+
+    // Stores session ID -> session status
+    private HashMap<String, String> sessionStatus;
+
+    // Stores session ID -> energy consumed in kWh
+    private HashMap<String, Double> energyConsumed;
+
+    // Stores session ID -> charging port ID
+    private HashMap<String, String> sessionPort;
+
+    // Used to generate unique session IDs
+    private int sessionCounter = 1001;
+
+    // Remote references obtained on startup
+    private ReservationInterface reservationServer;
+    private ChargingStationInterface chargingStation;
+
+    // Constructor
+    public ChargingSessionServer(
+            ReservationInterface reservationServer,
+            ChargingStationInterface chargingStation)
+            throws RemoteException {
+
+        super();
+
+        reservationSessions =
+                new HashMap<String, String>();
+
+        sessionStatus =
+                new HashMap<String, String>();
+
+        energyConsumed =
+                new HashMap<String, Double>();
+
+        sessionPort =
+                new HashMap<String, String>();
+
+        this.reservationServer =
+                reservationServer;
+
+        this.chargingStation =
+                chargingStation;
+    }
+
+    // =========================================================
+    // THREAD LOGGING METHOD
+    // =========================================================
+
+    private void log(String message) {
+
+        System.out.println(
+                "[Thread-" +
+                Thread.currentThread().getId() +
+                " | " +
+                Thread.currentThread().getName() +
+                "] " +
+                message
+        );
+    }
+
+    // =========================================================
+    // SIMULATED PROCESSING DELAY
+    // =========================================================
+
+    private void simulateProcessing(long milliseconds) {
+
+        try {
+
+            Thread.sleep(milliseconds);
+
+        } catch (InterruptedException e) {
+
+            Thread.currentThread().interrupt();
+
+            log("Thread interrupted during processing.");
+        }
+    }
+
+    // =========================================================
+    // START CHARGING
+    // =========================================================
+
+    public String startCharging(
+            String reservationId)
+            throws RemoteException {
+
+        log("START CHARGING request received for Reservation: "
+                + reservationId);
+
+        // -----------------------------------------------------
+        // Validate reservation ID
+        // -----------------------------------------------------
+
+        log("Validating Reservation ID...");
+
+        simulateProcessing(400);
+
+        if (reservationId == null ||
+                reservationId.length() == 0) {
+
+            log("Task failed: Invalid Reservation ID.");
+
+            return "Invalid Reservation ID.";
+        }
+
+        // -----------------------------------------------------
+        // Check whether session already exists
+        // -----------------------------------------------------
+
+        log("Checking whether a charging session already exists.");
+
+        simulateProcessing(400);
+
+        synchronized (this) {
+            if (reservationSessions.containsKey(
+                    reservationId)) {
+
+                String existingSession =
+                        reservationSessions.get(
+                                reservationId);
+
+                log("Existing session found: "
+                        + existingSession);
+
+                return "Charging session already exists.\n"
+                        + "Session ID: "
+                        + existingSession;
+            }
+        }
+
+        // -----------------------------------------------------
+        // STEP 1: Verify reservation
+        // -----------------------------------------------------
+
+        log("Contacting ReservationServer "
+                + "to verify reservation.");
+
+        simulateProcessing(500);
+
+        String reservationInfo;
+
+        try {
+
+            reservationInfo =
+                    reservationServer.getReservation(
+                            reservationId
+                    );
+
+            log("ReservationServer response received.");
+
+        } catch (RemoteException e) {
+
+            log("ReservationServer is unavailable.");
+
+            return "Could not verify reservation: "
+                    + "ReservationServer is unavailable ("
+                    + e.getMessage()
+                    + ").";
+        }
+
+        if (reservationInfo == null ||
+                reservationInfo.contains("not found")) {
+
+            log("Reservation validation failed.");
+
+            return "Invalid Reservation ID: "
+                    + reservationId
+                    + " (not found or already cancelled).";
+        }
+
+        log("Reservation verified successfully.");
+
+        // -----------------------------------------------------
+        // STEP 2: Determine charging port
+        // -----------------------------------------------------
+
+        log("Requesting charging port "
+                + "from ReservationServer.");
+
+        simulateProcessing(500);
+
+        String portId;
+
+        try {
+
+            portId =
+                    reservationServer.getReservationPort(
+                            reservationId
+                    );
+
+            log("Charging port received: "
+                    + portId);
+
+        } catch (RemoteException e) {
+
+            log("Could not obtain charging port.");
+
+            return "Could not determine charging port: "
+                    + "ReservationServer is unavailable ("
+                    + e.getMessage()
+                    + ").";
+        }
+
+        if (portId == null ||
+                portId.equals("NONE")) {
+
+            log("No charging port associated "
+                    + "with reservation.");
+
+            return "No charging port is associated "
+                    + "with reservation "
+                    + reservationId
+                    + ".";
+        }
+
+        // -----------------------------------------------------
+        // STEP 3: Start charging at station
+        // -----------------------------------------------------
+
+        log("Contacting ChargingStationServer.");
+
+        simulateProcessing(500);
+
+        String stationResult;
+
+        try {
+
+            stationResult =
+                    chargingStation.startPortCharging(
+                            portId
+                    );
+
+            log("ChargingStationServer response: "
+                    + stationResult);
+
+        } catch (RemoteException e) {
+
+            log("ChargingStationServer is unavailable.");
+
+            return "Could not start charging: "
+                    + "ChargingStationServer is unavailable ("
+                    + e.getMessage()
+                    + ").";
+        }
+
+        if (stationResult.equals(
+                "PORT_NOT_FOUND")) {
+
+            log("Port does not exist: "
+                    + portId);
+
+            return "Charging port "
+                    + portId
+                    + " does not exist on the station.";
+        }
+
+        if (stationResult.equals(
+                "PORT_NOT_RESERVED")) {
+
+            log("Port is not reserved: "
+                    + portId);
+
+            return "Charging port "
+                    + portId
+                    + " is not reserved "
+                    + "and cannot start charging.";
+        }
+
+        // -----------------------------------------------------
+        // STEP 4: Create charging session
+        // -----------------------------------------------------
+
+        log("Charging station confirmed "
+                + "that charging can start.");
+
+        log("Creating charging session...");
+
+        simulateProcessing(700);
+
+        String sessionId;
+
+        synchronized (this) {
+            sessionId =
+                    "SESSION-" + sessionCounter++;
+        }
+
+        log("Generated Session ID: "
+                + sessionId);
+
+        // -----------------------------------------------------
+        // Store session information
+        // -----------------------------------------------------
+
+        log("Storing session information...");
+
+        simulateProcessing(500);
+
+        synchronized (this) {
+            reservationSessions.put(
+                    reservationId,
+                    sessionId
+            );
+
+            sessionStatus.put(
+                    sessionId,
+                    "CHARGING"
+            );
+
+            energyConsumed.put(
+                    sessionId,
+                    0.0
+            );
+
+            sessionPort.put(
+                    sessionId,
+                    portId
+            );
+        }
+
+        log("Charging session created successfully.");
+
+        log("Reservation: "
+                + reservationId);
+
+        log("Port: "
+                + portId);
+
+        log("Session: "
+                + sessionId);
+
+        log("Status: CHARGING");
+
+        log("START CHARGING task completed.");
+
+        return "Charging Started Successfully!\n"
+                + "Reservation ID: "
+                + reservationId
+                + "\n"
+                + "Port: "
+                + portId
+                + "\n"
+                + "Session ID: "
+                + sessionId
+                + "\n"
+                + "Status: CHARGING";
+    }
+
+    // =========================================================
+    // STOP CHARGING
+    // =========================================================
+
+    public String stopCharging(
+            String sessionId)
+            throws RemoteException {
+
+        log("STOP CHARGING request received for Session: "
+                + sessionId);
+
+        // -----------------------------------------------------
+        // Check session
+        // -----------------------------------------------------
+
+        log("Checking charging session...");
+
+        simulateProcessing(400);
+
+        String currentStatus;
+
+        synchronized (this) {
+            if (!sessionStatus.containsKey(
+                    sessionId)) {
+
+                log("Session not found.");
+
+                return "Session not found.";
+            }
+
+            currentStatus =
+                    sessionStatus.get(
+                            sessionId);
+        }
+
+        log("Current session status: "
+                + currentStatus);
+
+        // -----------------------------------------------------
+        // Check if already completed
+        // -----------------------------------------------------
+
+        if (currentStatus.equals(
+                "COMPLETED")) {
+
+            log("Session is already completed.");
+
+            return "Charging session is already completed.";
+        }
+
+        // -----------------------------------------------------
+        // Calculate energy
+        // -----------------------------------------------------
+
+        log("Calculating energy consumed...");
+
+        simulateProcessing(700);
+
+        // Demonstration value: 25.0 kWh
+        double recordedEnergy = 25.0;
+
+        // -----------------------------------------------------
+        // Update session status (Port release happens after payment)
+        // -----------------------------------------------------
+
+        log("Updating session status to COMPLETED...");
+
+        simulateProcessing(500);
+
+        synchronized (this) {
+            energyConsumed.put(
+                    sessionId,
+                    recordedEnergy
+            );
+
+            sessionStatus.put(
+                    sessionId,
+                    "COMPLETED"
+            );
+        }
+
+        log("Session status changed to COMPLETED.");
+
+        log("STOP CHARGING task completed. Port remains locked until payment.");
+
+        return "Charging Stopped Successfully!\n"
+                + "Session ID: "
+                + sessionId
+                + "\n"
+                + "Energy Consumed: "
+                + recordedEnergy
+                + " kWh\n"
+                + "Status: COMPLETED\n"
+                + "Note: Port will be released after successful payment.";
+    }
+
+    // =========================================================
+    // GET SESSION STATUS
+    // =========================================================
+
+    public String getSessionStatus(
+            String sessionId)
+            throws RemoteException {
+
+        log("GET SESSION STATUS request received for: "
+                + sessionId);
+
+        log("Searching session database...");
+
+        simulateProcessing(400);
+
+        synchronized (this) {
+            if (!sessionStatus.containsKey(
+                    sessionId)) {
+
+                log("Session not found.");
+
+                return "Session not found.";
+            }
+
+            String status =
+                    sessionStatus.get(
+                            sessionId);
+
+            double energy =
+                    energyConsumed.get(
+                            sessionId);
+
+            log("Returning session status: "
+                    + status);
+
+            log("Energy consumed: "
+                    + energy
+                    + " kWh");
+
+            log("GET SESSION STATUS task completed.");
+
+            return "Session ID: "
+                    + sessionId
+                    + "\n"
+                    + "Status: "
+                    + status
+                    + "\n"
+                    + "Energy Consumed: "
+                    + energy
+                    + " kWh";
+        }
+    }
+
+    // =========================================================
+    // GET ENERGY CONSUMED
+    // =========================================================
+
+    public String getSessionPort(
+            String sessionId)
+            throws RemoteException {
+
+        log("GET SESSION PORT request received for: "
+                + sessionId);
+
+        simulateProcessing(300);
+
+        synchronized (this) {
+            if (!sessionPort.containsKey(sessionId)) {
+                log("Session port not found for: " + sessionId);
+                return "NONE";
+            }
+            String portId = sessionPort.get(sessionId);
+            log("Session " + sessionId + " is assigned to port: " + portId);
+            return portId;
+        }
+    }
+
+    public double getEnergyConsumed(
+            String sessionId)
+            throws RemoteException {
+
+        log("GET ENERGY request received for: "
+                + sessionId);
+
+        log("Searching energy database...");
+
+        simulateProcessing(400);
+
+        synchronized (this) {
+            if (!energyConsumed.containsKey(
+                    sessionId)) {
+
+                log("Session not found.");
+
+                return -1;
+            }
+
+            double energy =
+                    energyConsumed.get(
+                            sessionId);
+
+            log("Returning energy consumed: "
+                    + energy
+                    + " kWh");
+
+            log("GET ENERGY task completed.");
+
+            return energy;
+        }
+    }
+
+    // =========================================================
+    // MAIN
+    // =========================================================
+
+    public static void main(String[] args) {
+
+        final String HOST =
+                "rmi://localhost:1236/ChargingSessionServer";
+
+        try {
+
+            // -------------------------------------------------
+            // Connect to ChargingStationServer
+            // -------------------------------------------------
+
+            ChargingStationInterface chargingStation;
+
+            try {
+
+                chargingStation =
+                        (ChargingStationInterface)
+                        Naming.lookup(
+                                "rmi://localhost:1234//ChargingStationServer"
+                        );
+
+            } catch (Exception e) {
+
+                System.out.println(
+                        "Could not connect to "
+                        + "ChargingStationServer."
+                );
+
+                System.out.println(
+                        "Please start ChargingStationServer "
+                        + "on port 1234."
+                );
+
+                return;
+            }
+
+            // -------------------------------------------------
+            // Connect to ReservationServer
+            // -------------------------------------------------
+
+            ReservationInterface reservationServer;
+
+            try {
+
+                reservationServer =
+                        (ReservationInterface)
+                        Naming.lookup(
+                                "rmi://localhost:1235/ReservationService"
+                        );
+
+            } catch (Exception e) {
+
+                System.out.println(
+                        "Could not connect to "
+                        + "ReservationServer."
+                );
+
+                System.out.println(
+                        "Please start ReservationServer "
+                        + "on port 1235."
+                );
+
+                return;
+            }
+
+            // -------------------------------------------------
+            // Start server
+            // -------------------------------------------------
+
+            System.out.println(
+                    "Starting Charging Session Server.........."
+            );
+
+            ChargingSessionServer server =
+                    new ChargingSessionServer(
+                            reservationServer,
+                            chargingStation
+                    );
+
+            System.out.println(
+                    "Charging Session Server Instance Created......."
+            );
+
+            // Create RMI registry
+            LocateRegistry.createRegistry(1236);
+
+            // Bind server
+            Naming.bind(
+                    HOST,
+                    server
+            );
+
+            System.out.println(
+                    "Charging Session Server bound "
+                    + "to registry successfully.."
+            );
+
+            System.out.println(
+                    "Charging Session Server Ready...."
+            );
+
+            System.out.println(
+                    "Simulated processing delays: ENABLED"
+            );
+
+            System.out.println(
+                    "Waiting for client requests..."
+            );
+
+        } catch (Exception ex) {
+
+            System.out.println(
+                    "Exception : "
+                    + ex.getMessage()
+            );
+
+            ex.printStackTrace();
+        }
+    }
+}
+
+============================================================
+ChargingStationInterface.java
+============================================================
+
+import java.rmi.*;
+
+// Remote interface defining methods to check charging station status and ports
+public interface ChargingStationInterface extends Remote
+{
+    // Returns total available ports at the station
+    String getStationStatus() throws RemoteException;
+
+    // Returns list of available port IDs
+    String getAvailablePorts() throws RemoteException;
+
+    // Checks if a specific port (like P1, P2) is free or occupied
+    String checkPortAvailability(String portId) throws RemoteException;
+
+    // Reserves a specific port if it is AVAILABLE (atomic check-and-reserve)
+    String reservePort(String portId) throws RemoteException;
+
+    // Releases a port (RESERVED or CHARGING) back to AVAILABLE
+    String releasePort(String portId) throws RemoteException;
+
+    // Atomically finds and reserves the first AVAILABLE port.
+    // Used by ReservationServer so callers don't need to name a port.
+    // Returns the reserved port ID, or "NONE" if no port is available.
+    String reserveAnyAvailablePort() throws RemoteException;
+
+    // Transitions a RESERVED port into CHARGING. Used by ChargingSessionServer.
+    // Returns "CHARGING_STARTED", "PORT_NOT_FOUND", or "PORT_NOT_RESERVED".
+    String startPortCharging(String portId) throws RemoteException;
+}
+
+============================================================
+ChargingStationServer.java
+============================================================
+
+import java.rmi.*;
+import java.rmi.server.*;
+import java.rmi.registry.*;
+
+public class ChargingStationServer
+        extends UnicastRemoteObject
+        implements ChargingStationInterface
+{
+    private String[] ports = {"P1", "P2", "P3", "P4"};
+
+    private String[] portStatus =
+            {"AVAILABLE", "AVAILABLE", "AVAILABLE", "AVAILABLE"};
+
+    public ChargingStationServer() throws RemoteException
+    {
+        super();
+    }
+
+    // =========================================================
+    // THREAD LOGGING
+    // =========================================================
+
+    private void log(String message)
+    {
+        System.out.println(
+                "[Thread-" +
+                Thread.currentThread().getId() +
+                " | " +
+                Thread.currentThread().getName() +
+                "] " +
+                message
+        );
+    }
+
+    // =========================================================
+    // SIMULATED PROCESSING DELAY
+    // =========================================================
+
+    private void simulateProcessing(long milliseconds)
+    {
+        try
+        {
+            Thread.sleep(milliseconds);
+        }
+        catch (InterruptedException e)
+        {
+            Thread.currentThread().interrupt();
+
+            log("Thread interrupted during processing.");
+        }
+    }
+
+    // =========================================================
+    // FIND PORT
+    // =========================================================
+
+    private int indexOfPort(String portId)
+    {
+        for (int i = 0; i < ports.length; i++)
+        {
+            if (ports[i].equalsIgnoreCase(portId))
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
+    // =========================================================
+    // STATION STATUS
+    // =========================================================
+
+    public synchronized String getStationStatus()
+            throws RemoteException
+    {
+        log("GET STATION STATUS request received.");
+
+        simulateProcessing(500);
+
+        int availablePorts = 0;
+
+        for (String status : portStatus)
+        {
+            if (status.equals("AVAILABLE"))
+            {
+                availablePorts++;
+            }
+        }
+
+        log("Available ports: "
+                + availablePorts + "/" + ports.length);
+
+        log("GET STATION STATUS completed.");
+
+        return "Station EV-STATION-01: "
+                + availablePorts
+                + " of "
+                + ports.length
+                + " ports available.";
+    }
+
+    // =========================================================
+    // AVAILABLE PORTS
+    // =========================================================
+
+    public synchronized String getAvailablePorts()
+            throws RemoteException
+    {
+        log("GET AVAILABLE PORTS request received.");
+
+        simulateProcessing(500);
+
+        String result = "Available Ports: ";
+
+        boolean found = false;
+
+        for (int i = 0; i < ports.length; i++)
+        {
+            if (portStatus[i].equals("AVAILABLE"))
+            {
+                result += ports[i] + " ";
+                found = true;
+            }
+        }
+
+        if (!found)
+        {
+            log("No available ports.");
+
+            return "No ports are currently available.";
+        }
+
+        log("Available ports: " + result);
+
+        log("GET AVAILABLE PORTS completed.");
+
+        return result;
+    }
+
+    // =========================================================
+    // CHECK PORT
+    // =========================================================
+
+    public synchronized String checkPortAvailability(
+            String portId)
+            throws RemoteException
+    {
+        log("CHECK PORT request: " + portId);
+
+        simulateProcessing(500);
+
+        int i = indexOfPort(portId);
+
+        if (i == -1)
+        {
+            log("Port does not exist.");
+
+            return "Port " + portId
+                    + " does not exist.";
+        }
+
+        log("Port " + ports[i]
+                + " status: "
+                + portStatus[i]);
+
+        return "Port " + ports[i]
+                + " is "
+                + portStatus[i]
+                + ".";
+    }
+
+    // =========================================================
+    // RESERVE PORT
+    // =========================================================
+
+    public synchronized String reservePort(
+            String portId)
+            throws RemoteException
+    {
+        log("RESERVE PORT request: " + portId);
+
+        log("Checking port availability...");
+
+        simulateProcessing(700);
+
+        int i = indexOfPort(portId);
+
+        if (i == -1)
+        {
+            log("Port does not exist.");
+
+            return "Port " + portId
+                    + " does not exist.";
+        }
+
+        if (!portStatus[i].equals("AVAILABLE"))
+        {
+            log("Port " + ports[i]
+                    + " is "
+                    + portStatus[i]);
+
+            return "Port " + ports[i]
+                    + " is currently "
+                    + portStatus[i]
+                    + " and cannot be reserved.";
+        }
+
+        log("Port available. Reserving...");
+
+        simulateProcessing(500);
+
+        portStatus[i] = "RESERVED";
+
+        log("Port " + ports[i]
+                + " changed to RESERVED.");
+
+        return "Port " + ports[i]
+                + " reserved successfully.";
+    }
+
+    // =========================================================
+    // RELEASE PORT
+    // =========================================================
+
+    public synchronized String releasePort(
+            String portId)
+            throws RemoteException
+    {
+        log("RELEASE PORT request: " + portId);
+
+        simulateProcessing(500);
+
+        int i = indexOfPort(portId);
+
+        if (i == -1)
+        {
+            return "Port " + portId
+                    + " does not exist.";
+        }
+
+        portStatus[i] = "AVAILABLE";
+
+        log("Port " + portId
+                + " changed to AVAILABLE.");
+
+        return "Port " + ports[i]
+                + " released successfully. "
+                + "Now AVAILABLE.";
+    }
+
+    // =========================================================
+    // RESERVE ANY AVAILABLE PORT
+    // =========================================================
+
+    public synchronized String reserveAnyAvailablePort()
+            throws RemoteException
+    {
+        log("RESERVE ANY AVAILABLE PORT request received.");
+
+        log("Scanning charging ports...");
+
+        simulateProcessing(700);
+
+        for (int i = 0; i < ports.length; i++)
+        {
+            log("Checking "
+                    + ports[i]
+                    + " -> "
+                    + portStatus[i]);
+
+            if (portStatus[i].equals("AVAILABLE"))
+            {
+                log("Available port found: "
+                        + ports[i]);
+
+                log("Simulating port reservation...");
+
+                simulateProcessing(700);
+
+                portStatus[i] = "RESERVED";
+
+                log("Port "
+                        + ports[i]
+                        + " successfully RESERVED.");
+
+                return ports[i];
+            }
+        }
+
+        log("No available ports.");
+
+        return "NONE";
+    }
+
+    // =========================================================
+    // START CHARGING
+    // =========================================================
+
+    public synchronized String startPortCharging(
+            String portId)
+            throws RemoteException
+    {
+        log("START CHARGING request: "
+                + portId);
+
+        simulateProcessing(700);
+
+        int i = indexOfPort(portId);
+
+        if (i == -1)
+        {
+            return "PORT_NOT_FOUND";
+        }
+
+        if (!portStatus[i].equals("RESERVED"))
+        {
+            log("Port is not RESERVED.");
+
+            return "PORT_NOT_RESERVED";
+        }
+
+        log("Changing "
+                + portId
+                + " to CHARGING...");
+
+        simulateProcessing(500);
+
+        portStatus[i] = "CHARGING";
+
+        log("Port "
+                + portId
+                + " is now CHARGING.");
+
+        return "CHARGING_STARTED";
+    }
+
+    // =========================================================
+    // MAIN
+    // =========================================================
+
+    public static void main(String[] args)
+    {
+        try
+        {
+            final String HOST =
+                    "rmi://localhost:1234//ChargingStationServer";
+
+            LocateRegistry.createRegistry(1234);
+
+            ChargingStationServer server =
+                    new ChargingStationServer();
+
+            Naming.bind(HOST, server);
+
+            System.out.println(
+                    "Charging Station Server is running..."
+            );
+
+            System.out.println(
+                    "Station: EV-STATION-01"
+            );
+
+            System.out.println(
+                    "RMI Registry running on port 1234."
+            );
+
+            System.out.println(
+                    "Waiting for client requests..."
+            );
+        }
+        catch (Exception e)
+        {
+            System.out.println(
+                    "Server Exception: " + e
+            );
+        }
+    }
+}
+
+============================================================
+EVClient.java
+============================================================
+
+import java.rmi.Naming;
+import java.util.Scanner;
+
+// Unified EV / mobile-app style console client. This is an RMI client only --
+// it never binds or exports anything itself, it just looks up the five
+// existing RMI services and drives the same distributed flow the individual
+// per-module clients exercise, from one menu.
+public class EVClient {
+
+    // This project only manages a single charging station (EV-STATION-01).
+    // PricingServer's demand profiles are keyed by IDs like "S01", so that is
+    // the profile used for the project's one station (same convention
+    // PaymentServer uses internally when it calculates a bill).
+    private static final String STATION_ID = "S01";
+
+    private static String userId;
+    private static String vehicleId;
+
+    // Remembers the most recent IDs so later menu options can default to them
+    private static String lastReservationId = null;
+    private static String lastSessionId = null;
+    private static String lastPaymentId = null;
+
+    public static void main(String[] args) {
+
+        Scanner sc = new Scanner(System.in);
+
+        System.out.println("========================================");
+        System.out.println("             EV CHARGING APP");
+        System.out.println("========================================");
+
+        System.out.print("Enter User ID: ");
+        userId = sc.nextLine().trim();
+
+        System.out.print("Enter Vehicle ID: ");
+        vehicleId = sc.nextLine().trim();
+
+        while (true) {
+            printMenu();
+            System.out.print("Enter your choice: ");
+
+            String choiceLine = sc.nextLine().trim();
+            int choice;
+
+            try {
+                choice = Integer.parseInt(choiceLine);
+            } catch (NumberFormatException e) {
+                System.out.println("Invalid choice.");
+                continue;
+            }
+
+            switch (choice) {
+                case 1: viewStationStatus(); break;
+                case 2: viewAvailablePorts(); break;
+                case 3: checkPortAvailability(sc); break;
+                case 4: reserveSlot(); break;
+                case 5: checkReservation(sc); break;
+                case 6: cancelReservation(sc); break;
+                case 7: startCharging(sc); break;
+                case 8: checkSession(sc); break;
+                case 9: stopCharging(sc); break;
+                case 10: calculateBill(sc); break;
+                case 11: makePayment(sc); break;
+                case 12: checkPaymentStatus(sc); break;
+                case 13: viewPaymentDetails(sc); break;
+                case 14:
+                    System.out.println("Exiting EV Charging App...");
+                    sc.close();
+                    return;
+                default:
+                    System.out.println("Invalid choice.");
+            }
+        }
+    }
+
+    private static void printMenu() {
+        System.out.println();
+        System.out.println("========================================");
+        System.out.println("             EV CHARGING APP");
+        System.out.println("========================================");
+        System.out.println("1. View Station Status");
+        System.out.println("2. View Available Ports");
+        System.out.println("3. Check Port Availability");
+        System.out.println("4. Reserve Charging Slot");
+        System.out.println("5. Check Reservation");
+        System.out.println("6. Cancel Reservation");
+        System.out.println("7. Start Charging");
+        System.out.println("8. Check Charging Session");
+        System.out.println("9. Stop Charging");
+        System.out.println("10. Calculate Bill");
+        System.out.println("11. Make Payment");
+        System.out.println("12. Check Payment Status");
+        System.out.println("13. View Payment Details");
+        System.out.println("14. Exit");
+        System.out.println("========================================");
+    }
+
+    // ---------------------------------------------------------------
+    // Remote lookups (done per-call, so a server that (re)starts later
+    // is picked up without restarting EVClient)
+    // ---------------------------------------------------------------
+
+    private static ChargingStationInterface lookupChargingStation() throws Exception {
+        return (ChargingStationInterface) Naming.lookup(
+                "rmi://localhost:1234//ChargingStationServer"
+        );
+    }
+
+    private static ReservationInterface lookupReservation() throws Exception {
+        return (ReservationInterface) Naming.lookup(
+                "rmi://localhost:1235/ReservationService"
+        );
+    }
+
+    private static ChargingSessionInterface lookupChargingSession() throws Exception {
+        return (ChargingSessionInterface) Naming.lookup(
+                "rmi://localhost:1236/ChargingSessionServer"
+        );
+    }
+
+    private static PaymentInterface lookupPayment() throws Exception {
+        return (PaymentInterface) Naming.lookup(
+                "rmi://localhost:1237/PaymentServer"
+        );
+    }
+
+    private static PricingInterface lookupPricing() throws Exception {
+        return (PricingInterface) Naming.lookup(
+                "rmi://localhost:1238/PricingService"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Menu operations
+    // ---------------------------------------------------------------
+
+    private static void viewStationStatus() {
+        try {
+            ChargingStationInterface chargingStation = lookupChargingStation();
+            System.out.println();
+            System.out.println(chargingStation.getStationStatus());
+        } catch (Exception e) {
+            stationUnavailable();
+        }
+    }
+
+    private static void viewAvailablePorts() {
+        try {
+            ChargingStationInterface chargingStation = lookupChargingStation();
+            System.out.println();
+            System.out.println(chargingStation.getAvailablePorts());
+        } catch (Exception e) {
+            stationUnavailable();
+        }
+    }
+
+    private static void checkPortAvailability(Scanner sc) {
+        System.out.print("Enter Port ID (P1/P2/P3/P4): ");
+        String portId = sc.nextLine().trim();
+
+        try {
+            ChargingStationInterface chargingStation = lookupChargingStation();
+            System.out.println();
+            System.out.println(chargingStation.checkPortAvailability(portId));
+        } catch (Exception e) {
+            stationUnavailable();
+        }
+    }
+
+    private static void reserveSlot() {
+        try {
+            ReservationInterface reservation = lookupReservation();
+            String result = reservation.reserveSlot(userId, vehicleId);
+
+            System.out.println();
+            System.out.println(result);
+
+            String reservationId = extractField(result, "Reservation ID:");
+            if (reservationId != null) {
+                lastReservationId = reservationId;
+            }
+        } catch (Exception e) {
+            reservationUnavailable();
+        }
+    }
+
+    private static void checkReservation(Scanner sc) {
+        String reservationId = promptWithDefault(sc, "Enter Reservation ID", lastReservationId);
+
+        try {
+            ReservationInterface reservation = lookupReservation();
+            System.out.println();
+            System.out.println(reservation.getReservation(reservationId));
+        } catch (Exception e) {
+            reservationUnavailable();
+        }
+    }
+
+    private static void cancelReservation(Scanner sc) {
+        String reservationId = promptWithDefault(sc, "Enter Reservation ID", lastReservationId);
+
+        try {
+            ReservationInterface reservation = lookupReservation();
+            String result = reservation.cancelReservation(reservationId);
+
+            System.out.println();
+            System.out.println(result);
+
+            if (reservationId.equals(lastReservationId)) {
+                lastReservationId = null;
+            }
+        } catch (Exception e) {
+            reservationUnavailable();
+        }
+    }
+
+    private static void startCharging(Scanner sc) {
+        String reservationId = promptWithDefault(sc, "Enter Reservation ID", lastReservationId);
+
+        try {
+            ChargingSessionInterface chargingSession = lookupChargingSession();
+            String result = chargingSession.startCharging(reservationId);
+
+            System.out.println();
+            System.out.println(result);
+
+            String sessionId = extractField(result, "Session ID:");
+            if (sessionId != null) {
+                lastSessionId = sessionId;
+            }
+        } catch (Exception e) {
+            sessionUnavailable();
+        }
+    }
+
+    private static void checkSession(Scanner sc) {
+        String sessionId = promptWithDefault(sc, "Enter Session ID", lastSessionId);
+
+        try {
+            ChargingSessionInterface chargingSession = lookupChargingSession();
+            System.out.println();
+            System.out.println(chargingSession.getSessionStatus(sessionId));
+        } catch (Exception e) {
+            sessionUnavailable();
+        }
+    }
+
+    private static void stopCharging(Scanner sc) {
+        String sessionId = promptWithDefault(sc, "Enter Session ID", lastSessionId);
+
+        try {
+            ChargingSessionInterface chargingSession = lookupChargingSession();
+            System.out.println();
+            System.out.println(chargingSession.stopCharging(sessionId));
+        } catch (Exception e) {
+            sessionUnavailable();
+        }
+    }
+
+    // Calculate Bill: pulls the real energy consumed from ChargingSessionServer,
+    // then asks PricingServer for the real price. Nothing here is invented locally.
+    private static void calculateBill(Scanner sc) {
+        String sessionId = promptWithDefault(sc, "Enter Session ID", lastSessionId);
+
+        double energy;
+        try {
+            ChargingSessionInterface chargingSession = lookupChargingSession();
+            energy = chargingSession.getEnergyConsumed(sessionId);
+        } catch (Exception e) {
+            sessionUnavailable();
+            return;
+        }
+
+        if (energy < 0) {
+            System.out.println();
+            System.out.println("No energy data found for session " + sessionId +
+                    " (has charging finished yet?).");
+            return;
+        }
+
+        try {
+            PricingInterface pricing = lookupPricing();
+            double price = pricing.calculatePrice(STATION_ID, energy);
+
+            System.out.println();
+            System.out.println("Session ID: " + sessionId);
+            System.out.println("Energy Consumed: " + energy + " kWh");
+
+            if (price < 0) {
+                System.out.println("Pricing Server returned an invalid price.");
+            } else {
+                System.out.println("Estimated Bill: Rs. " + String.format("%.2f", price));
+            }
+        } catch (Exception e) {
+            pricingUnavailable();
+        }
+    }
+
+    private static void makePayment(Scanner sc) {
+        String sessionId = promptWithDefault(sc, "Enter Session ID", lastSessionId);
+
+        try {
+            PaymentInterface payment = lookupPayment();
+            String result = payment.makePayment(sessionId);
+
+            System.out.println();
+            System.out.println(result);
+
+            String paymentId = extractField(result, "Payment ID:");
+            if (paymentId != null) {
+                lastPaymentId = paymentId;
+            }
+        } catch (Exception e) {
+            paymentUnavailable();
+        }
+    }
+
+    private static void checkPaymentStatus(Scanner sc) {
+        String paymentId = promptWithDefault(sc, "Enter Payment ID", lastPaymentId);
+
+        try {
+            PaymentInterface payment = lookupPayment();
+            System.out.println();
+            System.out.println(payment.getPaymentStatus(paymentId));
+        } catch (Exception e) {
+            paymentUnavailable();
+        }
+    }
+
+    private static void viewPaymentDetails(Scanner sc) {
+        String paymentId = promptWithDefault(sc, "Enter Payment ID", lastPaymentId);
+
+        try {
+            PaymentInterface payment = lookupPayment();
+            System.out.println();
+            System.out.println(payment.getPaymentDetails(paymentId));
+        } catch (Exception e) {
+            paymentUnavailable();
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Helpers
+    // ---------------------------------------------------------------
+
+    private static String promptWithDefault(Scanner sc, String label, String defaultValue) {
+        if (defaultValue != null) {
+            System.out.print(label + " [" + defaultValue + "]: ");
+        } else {
+            System.out.print(label + ": ");
+        }
+
+        String input = sc.nextLine().trim();
+
+        if (input.isEmpty() && defaultValue != null) {
+            return defaultValue;
+        }
+
+        return input;
+    }
+
+    // Pulls a "Label: value" token out of a server response, stopping at the
+    // next comma or newline. Same convention used by MultithreadedReservationClient.
+    private static String extractField(String text, String label) {
+        int start = text.indexOf(label);
+
+        if (start == -1) {
+            return null;
+        }
+
+        start += label.length();
+
+        int endComma = text.indexOf(",", start);
+        int endNewline = text.indexOf("\n", start);
+        int end = text.length();
+
+        if (endComma != -1) {
+            end = Math.min(end, endComma);
+        }
+        if (endNewline != -1) {
+            end = Math.min(end, endNewline);
+        }
+
+        return text.substring(start, end).trim();
+    }
+
+    private static void stationUnavailable() {
+        System.out.println();
+        System.out.println("Charging Station Server unavailable.");
+        System.out.println("Please start the ChargingStationServer first.");
+    }
+
+    private static void reservationUnavailable() {
+        System.out.println();
+        System.out.println("Reservation Server unavailable.");
+        System.out.println("Please start the ReservationServer first.");
+    }
+
+    private static void sessionUnavailable() {
+        System.out.println();
+        System.out.println("Charging Session Server unavailable.");
+        System.out.println("Please start the ChargingSessionServer first.");
+    }
+
+    private static void pricingUnavailable() {
+        System.out.println();
+        System.out.println("Pricing Server unavailable.");
+        System.out.println("Please start the PricingServer first.");
+    }
+
+    private static void paymentUnavailable() {
+        System.out.println();
+        System.out.println("Payment Server unavailable.");
+        System.out.println("Please start the PaymentServer first.");
+    }
+}
+
+
+============================================================
+MultithreadTest.java
+============================================================
+
+import java.rmi.Naming;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+
+// =============================================================
+// MULTITHREADED TEST FOR COMPLETE EV RMI WORKFLOW
+//
+// Each simulated EV performs:
+//
+//      Reservation
+//          v
+//      Charging Session Start
+//          v
+//      Charging Session Stop
+//          v
+//      Payment
+//
+// This allows concurrent requests to reach:
+//
+//      ReservationServer
+//      ChargingStationServer
+//      ChargingSessionServer
+//      PricingServer
+//      PaymentServer
+// =============================================================
+
+public class MultithreadTest {
+
+    // Number of simulated EVs
+    private static final int NUMBER_OF_EV_REQUESTS = 10;
+
+    // RMI service locations
+    private static final String RESERVATION_URL =
+            "rmi://localhost:1235/ReservationService";
+
+    private static final String SESSION_URL =
+            "rmi://localhost:1236/ChargingSessionServer";
+
+    private static final String PAYMENT_URL =
+            "rmi://localhost:1237/PaymentServer";
+
+    private static final String PRICING_URL =
+            "rmi://localhost:1238/PricingService";
+
+    public static void main(String[] args) {
+
+        System.out.println(
+                "============================================================"
+        );
+
+        System.out.println(
+                "       MULTITHREADED RMI TEST - COMPLETE EV WORKFLOW"
+        );
+
+        System.out.println(
+                "============================================================"
+        );
+
+        System.out.println(
+                "Number of simulated EVs: "
+                + NUMBER_OF_EV_REQUESTS
+        );
+
+        System.out.println();
+
+        System.out.println(
+                "Each EV will perform:"
+        );
+
+        System.out.println(
+                "RESERVE -> START CHARGING -> STOP CHARGING -> PAYMENT"
+        );
+
+        System.out.println();
+
+        System.out.println(
+                "Servers involved:"
+        );
+
+        System.out.println(
+                "ReservationServer       : 1235"
+        );
+
+        System.out.println(
+                "ChargingSessionServer   : 1236"
+        );
+
+        System.out.println(
+                "PaymentServer            : 1237"
+        );
+
+        System.out.println(
+                "PricingServer            : 1238"
+        );
+
+        System.out.println(
+                "ChargingStationServer    : 1234"
+        );
+
+        System.out.println(
+                "============================================================"
+        );
+
+        try {
+
+            // =====================================================
+            // CREATE THREAD POOL
+            // =====================================================
+
+            ExecutorService executor =
+                    Executors.newFixedThreadPool(
+                            NUMBER_OF_EV_REQUESTS
+                    );
+
+            // =====================================================
+            // START LATCH
+            //
+            // All EV threads wait here.
+            //
+            // This allows us to release all EVs at approximately
+            // the same time.
+            // =====================================================
+
+            CountDownLatch startSignal =
+                    new CountDownLatch(1);
+
+            // =====================================================
+            // COMPLETION LATCH
+            //
+            // Main thread waits until all EV threads finish.
+            // =====================================================
+
+            CountDownLatch completionSignal =
+                    new CountDownLatch(
+                            NUMBER_OF_EV_REQUESTS
+                    );
+
+            // =====================================================
+            // CREATE EV THREADS
+            // =====================================================
+
+            for (int i = 1;
+                 i <= NUMBER_OF_EV_REQUESTS;
+                 i++) {
+
+                final int evNumber = i;
+
+                executor.submit(() -> {
+
+                    String userId =
+                            "USER-" + evNumber;
+
+                    String vehicleId =
+                            "EV-" + evNumber;
+
+                    try {
+
+                        // =================================================
+                        // CLIENT THREAD INFORMATION
+                        // =================================================
+
+                        long threadId =
+                                Thread.currentThread().getId();
+
+                        String threadName =
+                                Thread.currentThread().getName();
+
+                        System.out.println();
+
+                        System.out.println(
+                                "[CLIENT THREAD-"
+                                + threadId
+                                + " | "
+                                + threadName
+                                + "] "
+                                + userId
+                                + " preparing..."
+                        );
+
+                        // =================================================
+                        // EACH EV CREATES ITS OWN RMI LOOKUPS
+                        // =================================================
+
+                        ReservationInterface reservation =
+                                (ReservationInterface)
+                                Naming.lookup(
+                                        RESERVATION_URL
+                                );
+
+                        ChargingSessionInterface chargingSession =
+                                (ChargingSessionInterface)
+                                Naming.lookup(
+                                        SESSION_URL
+                                );
+
+                        PaymentInterface payment =
+                                (PaymentInterface)
+                                Naming.lookup(
+                                        PAYMENT_URL
+                                );
+
+                        PricingInterface pricing =
+                                (PricingInterface)
+                                Naming.lookup(
+                                        PRICING_URL
+                                );
+
+                        System.out.println(
+                                "[CLIENT THREAD-"
+                                + threadId
+                                + "] "
+                                + userId
+                                + " connected to all RMI servers."
+                        );
+
+                        // =================================================
+                        // WAIT FOR START SIGNAL
+                        // =================================================
+
+                        startSignal.await();
+
+                        System.out.println();
+
+                        System.out.println(
+                                "************************************************************"
+                        );
+
+                        System.out.println(
+                                "[CLIENT THREAD-"
+                                + threadId
+                                + "] "
+                                + userId
+                                + " STARTING COMPLETE WORKFLOW"
+                        );
+
+                        System.out.println(
+                                "************************************************************"
+                        );
+
+                        // =================================================
+                        // STEP 1
+                        // RESERVATION
+                        // =================================================
+
+                        System.out.println();
+
+                        System.out.println(
+                                "[CLIENT THREAD-"
+                                + threadId
+                                + "] "
+                                + userId
+                                + " -> RESERVATION"
+                        );
+
+                        String reservationResponse =
+                                reservation.reserveSlot(
+                                        userId,
+                                        vehicleId
+                                );
+
+                        System.out.println(
+                                "[CLIENT THREAD-"
+                                + threadId
+                                + "] "
+                                + userId
+                                + " Reservation Response:"
+                        );
+
+                        System.out.println(
+                                reservationResponse
+                        );
+
+                        // =================================================
+                        // CHECK WHETHER RESERVATION SUCCEEDED
+                        // =================================================
+
+                        if (reservationResponse == null ||
+                                !reservationResponse.contains(
+                                        "Reservation successful")) {
+
+                            System.out.println();
+
+                            System.out.println(
+                                    "[CLIENT THREAD-"
+                                    + threadId
+                                    + "] "
+                                    + userId
+                                    + " could NOT obtain a charging port."
+                            );
+
+                            System.out.println(
+                                    "[CLIENT THREAD-"
+                                    + threadId
+                                    + "] "
+                                    + userId
+                                    + " workflow stopped."
+                            );
+
+                            return;
+                        }
+
+                        // =================================================
+                        // EXTRACT RESERVATION ID
+                        // =================================================
+
+                        String reservationId =
+                                extractReservationId(
+                                        reservationResponse
+                                );
+
+                        if (reservationId == null) {
+
+                            System.out.println(
+                                    "[CLIENT THREAD-"
+                                    + threadId
+                                    + "] "
+                                    + userId
+                                    + " could not extract Reservation ID."
+                            );
+
+                            return;
+                        }
+
+                        System.out.println(
+                                "[CLIENT THREAD-"
+                                + threadId
+                                + "] "
+                                + userId
+                                + " Reservation ID: "
+                                + reservationId
+                        );
+
+                        // =================================================
+                        // STEP 2
+                        // START CHARGING
+                        // =================================================
+
+                        System.out.println();
+
+                        System.out.println(
+                                "[CLIENT THREAD-"
+                                + threadId
+                                + "] "
+                                + userId
+                                + " -> START CHARGING"
+                        );
+
+                        String startResponse =
+                                chargingSession.startCharging(
+                                        reservationId
+                                );
+
+                        System.out.println(
+                                "[CLIENT THREAD-"
+                                + threadId
+                                + "] "
+                                + userId
+                                + " Charging Start Response:"
+                        );
+
+                        System.out.println(
+                                startResponse
+                        );
+
+                        // =================================================
+                        // CHECK WHETHER CHARGING STARTED
+                        // =================================================
+
+                        if (startResponse == null ||
+                                !startResponse.contains(
+                                        "Charging Started Successfully")) {
+
+                            System.out.println(
+                                    "[CLIENT THREAD-"
+                                    + threadId
+                                    + "] "
+                                    + userId
+                                    + " could not start charging."
+                            );
+
+                            return;
+                        }
+
+                        // =================================================
+                        // EXTRACT SESSION ID
+                        // =================================================
+
+                        String sessionId =
+                                extractSessionId(
+                                        startResponse
+                                );
+
+                        if (sessionId == null) {
+
+                            System.out.println(
+                                    "[CLIENT THREAD-"
+                                    + threadId
+                                    + "] "
+                                    + userId
+                                    + " could not extract Session ID."
+                            );
+
+                            return;
+                        }
+
+                        System.out.println(
+                                "[CLIENT THREAD-"
+                                + threadId
+                                + "] "
+                                + userId
+                                + " Session ID: "
+                                + sessionId
+                        );
+
+                        // =================================================
+                        // SMALL DELAY TO SIMULATE CHARGING
+                        // =================================================
+
+                        System.out.println();
+
+                        System.out.println(
+                                "[CLIENT THREAD-"
+                                + threadId
+                                + "] "
+                                + userId
+                                + " charging..."
+                        );
+
+                        Thread.sleep(1000);
+
+                        // =================================================
+                        // STEP 3
+                        // STOP CHARGING
+                        // =================================================
+
+                        System.out.println();
+
+                        System.out.println(
+                                "[CLIENT THREAD-"
+                                + threadId
+                                + "] "
+                                + userId
+                                + " -> STOP CHARGING"
+                        );
+
+                        String stopResponse =
+                                chargingSession.stopCharging(
+                                        sessionId
+                                );
+
+                        System.out.println(
+                                "[CLIENT THREAD-"
+                                + threadId
+                                + "] "
+                                + userId
+                                + " Charging Stop Response:"
+                        );
+
+                        System.out.println(
+                                stopResponse
+                        );
+
+                        // =================================================
+                        // CHECK WHETHER CHARGING STOPPED
+                        // =================================================
+
+                        if (stopResponse == null ||
+                                !stopResponse.contains(
+                                        "Charging Stopped Successfully")) {
+
+                            System.out.println(
+                                    "[CLIENT THREAD-"
+                                    + threadId
+                                    + "] "
+                                    + userId
+                                    + " could not stop charging."
+                            );
+
+                            return;
+                        }
+
+                        // =================================================
+                        // STEP 4
+                        // GET ENERGY
+                        // =================================================
+
+                        double energy =
+                                chargingSession.getEnergyConsumed(
+                                        sessionId
+                                );
+
+                        System.out.println();
+
+                        System.out.println(
+                                "[CLIENT THREAD-"
+                                + threadId
+                                + "] "
+                                + userId
+                                + " Energy Consumed: "
+                                + energy
+                                + " kWh"
+                        );
+
+                        // =================================================
+                        // STEP 5
+                        // PRICING SERVER
+                        //
+                        // This directly contacts PricingServer so
+                        // multithreading can be visibly demonstrated
+                        // there as well.
+                        // =================================================
+
+                        System.out.println();
+
+                        System.out.println(
+                                "[CLIENT THREAD-"
+                                + threadId
+                                + "] "
+                                + userId
+                                + " -> PRICING SERVER"
+                        );
+
+                        double price =
+                                pricing.calculatePrice(
+                                        "S01",
+                                        energy
+                                );
+
+                        System.out.println(
+                                "[CLIENT THREAD-"
+                                + threadId
+                                + "] "
+                                + userId
+                                + " Calculated Price: Rs. "
+                                + price
+                        );
+
+                        // =================================================
+                        // STEP 6
+                        // PAYMENT SERVER
+                        // =================================================
+
+                        System.out.println();
+
+                        System.out.println(
+                                "[CLIENT THREAD-"
+                                + threadId
+                                + "] "
+                                + userId
+                                + " -> PAYMENT SERVER"
+                        );
+
+                        String paymentResponse =
+                                payment.makePayment(
+                                        sessionId
+                                );
+
+                        System.out.println(
+                                "[CLIENT THREAD-"
+                                + threadId
+                                + "] "
+                                + userId
+                                + " Payment Response:"
+                        );
+
+                        System.out.println(
+                                paymentResponse
+                        );
+
+                        // =================================================
+                        // WORKFLOW COMPLETE
+                        // =================================================
+
+                        System.out.println();
+
+                        System.out.println(
+                                "[CLIENT THREAD-"
+                                + threadId
+                                + "] "
+                                + userId
+                                + " COMPLETE WORKFLOW FINISHED."
+                        );
+
+                        System.out.println(
+                                "************************************************************"
+                        );
+
+                    } catch (Exception e) {
+
+                        System.out.println();
+
+                        System.out.println(
+                                "[CLIENT THREAD-"
+                                + Thread.currentThread().getId()
+                                + "] "
+                                + userId
+                                + " ERROR:"
+                        );
+
+                        System.out.println(
+                                e.getMessage()
+                        );
+
+                    } finally {
+
+                        // Tell main thread that this EV is finished
+                        completionSignal.countDown();
+                    }
+                });
+            }
+
+            // =====================================================
+            // GIVE THREADS TIME TO PREPARE
+            // =====================================================
+
+            System.out.println();
+
+            System.out.println(
+                    "All EV threads are preparing RMI connections..."
+            );
+
+            Thread.sleep(2000);
+
+            System.out.println();
+
+            System.out.println(
+                    "All EV threads are ready."
+            );
+
+            System.out.println();
+
+            System.out.println(
+                    "============================================================"
+            );
+
+            System.out.println(
+                    "STARTING ALL EV REQUESTS CONCURRENTLY"
+            );
+
+            System.out.println(
+                    "============================================================"
+            );
+
+            long startTime =
+                    System.currentTimeMillis();
+
+            // =====================================================
+            // RELEASE ALL EV THREADS
+            // =====================================================
+
+            startSignal.countDown();
+
+            // =====================================================
+            // WAIT FOR ALL EV THREADS
+            // =====================================================
+
+            completionSignal.await();
+
+            long endTime =
+                    System.currentTimeMillis();
+
+            // =====================================================
+            // SHUTDOWN EXECUTOR
+            // =====================================================
+
+            executor.shutdown();
+
+            executor.awaitTermination(
+                    30,
+                    TimeUnit.SECONDS
+            );
+
+            // =====================================================
+            // TEST COMPLETE
+            // =====================================================
+
+            System.out.println();
+
+            System.out.println(
+                    "============================================================"
+            );
+
+            System.out.println(
+                    "          MULTITHREADED RMI TEST COMPLETED"
+            );
+
+            System.out.println(
+                    "============================================================"
+            );
+
+            System.out.println(
+                    "Total EV threads: "
+                    + NUMBER_OF_EV_REQUESTS
+            );
+
+            System.out.println(
+                    "Total execution time: "
+                    + (endTime - startTime)
+                    + " ms"
+            );
+
+            System.out.println();
+
+            System.out.println(
+                    "Servers tested:"
+            );
+
+            System.out.println(
+                    "[OK] ReservationServer"
+            );
+
+            System.out.println(
+                    "[OK] ChargingStationServer"
+            );
+
+            System.out.println(
+                    "[OK] ChargingSessionServer"
+            );
+
+            System.out.println(
+                    "[OK] PricingServer"
+            );
+
+            System.out.println(
+                    "[OK] PaymentServer"
+            );
+
+            System.out.println();
+
+            System.out.println(
+                    "All EV threads completed."
+            );
+
+            System.out.println(
+                    "============================================================"
+            );
+
+        } catch (Exception e) {
+
+            System.out.println();
+
+            System.out.println(
+                    "MULTITHREADED TEST FAILED"
+            );
+
+            System.out.println(
+                    "Error: "
+                    + e.getMessage()
+            );
+
+            e.printStackTrace();
+        }
+    }
+
+    // =============================================================
+    // EXTRACT RESERVATION ID
+    // =============================================================
+
+    private static String extractReservationId(
+            String response) {
+
+        try {
+
+            int start =
+                    response.indexOf(
+                            "Reservation ID:"
+                    );
+
+            if (start == -1) {
+                return null;
+            }
+
+            start +=
+                    "Reservation ID:".length();
+
+            int end =
+                    response.indexOf(
+                            ",",
+                            start
+                    );
+
+            if (end == -1) {
+
+                end =
+                        response.indexOf(
+                                "\n",
+                                start
+                        );
+            }
+
+            if (end == -1) {
+                end = response.length();
+            }
+
+            return response
+                    .substring(start, end)
+                    .trim();
+
+        } catch (Exception e) {
+
+            return null;
+        }
+    }
+
+    // =============================================================
+    // EXTRACT SESSION ID
+    // =============================================================
+
+    private static String extractSessionId(
+            String response) {
+
+        try {
+
+            int start =
+                    response.indexOf(
+                            "Session ID:"
+                    );
+
+            if (start == -1) {
+                return null;
+            }
+
+            start +=
+                    "Session ID:".length();
+
+            int end =
+                    response.indexOf(
+                            "\n",
+                            start
+                    );
+
+            if (end == -1) {
+                end = response.length();
+            }
+
+            return response
+                    .substring(start, end)
+                    .trim();
+
+        } catch (Exception e) {
+
+            return null;
+        }
+    }
+}
+
+============================================================
+PaymentInterface.java
+============================================================
+
+import java.rmi.*;
+
+// Remote interface defining methods for processing payments and checking payment records
+public interface PaymentInterface extends Remote {
+
+    // Process payment for a given (completed) session ID.
+    // The amount is derived via RMI from ChargingSessionServer's energy
+    // consumed and PricingServer's rate, not supplied by the caller.
+    String makePayment(
+        String sessionId
+    ) throws RemoteException;
+
+    // Check payment status using payment ID
+    String getPaymentStatus(
+        String paymentId
+    ) throws RemoteException;
+
+    // Retrieve full payment breakdown by payment ID
+    String getPaymentDetails(
+        String paymentId
+    ) throws RemoteException;
+}
+
+============================================================
+PaymentServer.java
+============================================================
+
+import java.rmi.*;
+import java.rmi.server.*;
+import java.rmi.registry.*;
+import java.util.HashMap;
+
+// RMI Server class that implements PaymentInterface
+public class PaymentServer
+        extends UnicastRemoteObject
+        implements PaymentInterface {
+
+    // Stores payment ID -> payment status
+    private HashMap<String, String> paymentStatus;
+
+    // Stores payment ID -> detailed payment summary
+    private HashMap<String, String> paymentDetails;
+
+    // Sequential counter for payment IDs
+    private int paymentCounter = 1001;
+
+    // Single station used by this project
+    private static final String STATION_ID = "S01";
+
+    // Remote references
+    private ChargingSessionInterface chargingSession;
+    private PricingInterface pricing;
+    private ChargingStationInterface chargingStation;
+
+    // Constructor with ChargingStationInterface
+    public PaymentServer(
+            ChargingSessionInterface chargingSession,
+            PricingInterface pricing,
+            ChargingStationInterface chargingStation)
+            throws RemoteException {
+
+        super();
+
+        paymentStatus =
+                new HashMap<String, String>();
+
+        paymentDetails =
+                new HashMap<String, String>();
+
+        this.chargingSession =
+                chargingSession;
+
+        this.pricing =
+                pricing;
+
+        this.chargingStation =
+                chargingStation;
+    }
+
+    // Overloaded constructor for backwards compatibility
+    public PaymentServer(
+            ChargingSessionInterface chargingSession,
+            PricingInterface pricing)
+            throws RemoteException {
+
+        this(chargingSession, pricing, null);
+    }
+
+    // =========================================================
+    // THREAD LOGGING
+    // =========================================================
+
+    private void log(String message)
+    {
+        System.out.println(
+                "[Thread-" +
+                Thread.currentThread().getId() +
+                " | " +
+                Thread.currentThread().getName() +
+                "] " +
+                message
+        );
+    }
+
+    // =========================================================
+    // SIMULATED PROCESSING DELAY
+    // =========================================================
+
+    private void simulateProcessing(long milliseconds)
+    {
+        try
+        {
+            Thread.sleep(milliseconds);
+        }
+        catch (InterruptedException e)
+        {
+            Thread.currentThread().interrupt();
+
+            log("Thread interrupted during processing.");
+        }
+    }
+
+    // =========================================================
+    // MAKE PAYMENT
+    // =========================================================
+
+    public String makePayment(
+            String sessionId)
+            throws RemoteException {
+
+        log("MAKE PAYMENT request received for Session: "
+                + sessionId);
+
+        // -----------------------------------------------------
+        // Validate session ID
+        // -----------------------------------------------------
+
+        log("Validating Session ID...");
+
+        simulateProcessing(500);
+
+        if (sessionId == null ||
+                sessionId.length() == 0) {
+
+            log("Payment failed: Invalid Session ID.");
+
+            return "Invalid Session ID.";
+        }
+
+        // -----------------------------------------------------
+        // STEP 1: Get session status
+        // -----------------------------------------------------
+
+        log("Contacting ChargingSessionServer "
+                + "to verify session.");
+
+        simulateProcessing(500);
+
+        String sessionInfo;
+
+        try {
+
+            sessionInfo =
+                    chargingSession.getSessionStatus(
+                            sessionId
+                    );
+
+            log("ChargingSessionServer response received.");
+
+        }
+        catch (RemoteException e) {
+
+            log("ChargingSessionServer is unavailable.");
+
+            return "Payment failed: "
+                    + "ChargingSessionServer is unavailable ("
+                    + e.getMessage()
+                    + ").";
+        }
+
+        // -----------------------------------------------------
+        // Validate session
+        // -----------------------------------------------------
+
+        log("Checking session status...");
+
+        simulateProcessing(400);
+
+        if (sessionInfo == null ||
+                sessionInfo.contains("Session not found")) {
+
+            log("Session not found: "
+                    + sessionId);
+
+            return "Payment failed: Session "
+                    + sessionId
+                    + " not found.";
+        }
+
+        if (!sessionInfo.contains("COMPLETED")) {
+
+            log("Session has not completed charging.");
+
+            return "Payment failed: Session "
+                    + sessionId
+                    + " has not finished charging yet.";
+        }
+
+        log("Session verified and charging is COMPLETED.");
+
+        // -----------------------------------------------------
+        // STEP 2: Get energy consumed
+        // -----------------------------------------------------
+
+        log("Requesting energy consumption "
+                + "from ChargingSessionServer.");
+
+        simulateProcessing(500);
+
+        double energy;
+
+        try {
+
+            energy =
+                    chargingSession.getEnergyConsumed(
+                            sessionId
+                    );
+
+            log("Energy received: "
+                    + energy + " kWh");
+
+        }
+        catch (RemoteException e) {
+
+            log("Could not retrieve energy consumed.");
+
+            return "Payment failed: "
+                    + "could not retrieve energy consumed ("
+                    + e.getMessage()
+                    + ").";
+        }
+
+        if (energy < 0) {
+
+            log("Invalid energy value received.");
+
+            return "Payment failed: "
+                    + "no energy data found for session "
+                    + sessionId
+                    + ".";
+        }
+
+        // -----------------------------------------------------
+        // STEP 3: Contact PricingServer
+        // -----------------------------------------------------
+
+        log("Contacting PricingServer "
+                + "to calculate final price.");
+
+        simulateProcessing(500);
+
+        double amount;
+
+        try {
+
+            amount =
+                    pricing.calculatePrice(
+                            STATION_ID,
+                            energy
+                    );
+
+            log("PricingServer returned amount: "
+                    + "Rs. " + amount);
+
+        }
+        catch (RemoteException e) {
+
+            log("PricingServer is unavailable.");
+
+            return "Payment failed: "
+                    + "PricingServer is unavailable ("
+                    + e.getMessage()
+                    + ").";
+        }
+
+        if (amount < 0) {
+
+            log("PricingServer returned invalid price.");
+
+            return "Payment failed: "
+                    + "PricingServer returned "
+                    + "an invalid price.";
+        }
+
+        // -----------------------------------------------------
+        // STEP 4: Generate payment ID
+        // -----------------------------------------------------
+
+        log("Generating payment ID...");
+
+        simulateProcessing(500);
+
+        String paymentId;
+
+        synchronized (this) {
+            paymentId =
+                    "PAY-" + paymentCounter++;
+        }
+
+        log("Generated Payment ID: "
+                + paymentId);
+
+        // -----------------------------------------------------
+        // STEP 5: Store payment
+        // -----------------------------------------------------
+
+        log("Saving payment information...");
+
+        simulateProcessing(500);
+
+        String status = "SUCCESS";
+
+        // -----------------------------------------------------
+        // STEP 6: Release Charging Port (Post-Payment Release)
+        // -----------------------------------------------------
+
+        String releaseMessage = "";
+
+        try {
+
+            String portId = chargingSession.getSessionPort(sessionId);
+
+            if (portId != null && !portId.equals("NONE") && chargingStation != null) {
+
+                log("Payment SUCCESS. Requesting ChargingStationServer to release port: "
+                        + portId);
+
+                simulateProcessing(500);
+
+                String stationResult = chargingStation.releasePort(portId);
+
+                releaseMessage = "\nCharging Port Status: " + stationResult;
+
+                log("ChargingStationServer release response: " + stationResult);
+            }
+
+        } catch (Exception e) {
+
+            log("WARNING: Could not release charging port after payment: "
+                    + e.getMessage());
+        }
+
+        String details =
+                "Payment ID: " + paymentId
+                + "\nSession ID: " + sessionId
+                + "\nEnergy Consumed: " + energy + " kWh"
+                + "\nAmount: Rs. " + amount
+                + "\nPayment Status: " + status
+                + releaseMessage;
+
+        synchronized (this) {
+            paymentStatus.put(
+                    paymentId,
+                    status
+            );
+
+            paymentDetails.put(
+                    paymentId,
+                    details
+            );
+        }
+
+        log("Payment stored successfully.");
+
+        log("Payment ID: "
+                + paymentId
+                + " | Amount: Rs. "
+                + amount
+                + " | Status: SUCCESS");
+
+        log("MAKE PAYMENT task completed.");
+
+        return "Payment Successful!\n"
+                + details;
+    }
+
+    // =========================================================
+    // GET PAYMENT STATUS
+    // =========================================================
+
+    public String getPaymentStatus(
+            String paymentId)
+            throws RemoteException {
+
+        log("GET PAYMENT STATUS request received for: "
+                + paymentId);
+
+        log("Searching payment database...");
+
+        simulateProcessing(400);
+
+        synchronized (this) {
+            if (!paymentStatus.containsKey(paymentId)) {
+
+                log("Payment not found: "
+                        + paymentId);
+
+                return "Payment not found.";
+            }
+
+            String status =
+                    paymentStatus.get(paymentId);
+
+            log("Payment status returned: "
+                    + status);
+
+            log("GET PAYMENT STATUS task completed.");
+
+            return "Payment ID: "
+                    + paymentId
+                    + "\nPayment Status: "
+                    + status;
+        }
+    }
+
+    // =========================================================
+    // GET PAYMENT DETAILS
+    // =========================================================
+
+    public String getPaymentDetails(
+            String paymentId)
+            throws RemoteException {
+
+        log("GET PAYMENT DETAILS request received for: "
+                + paymentId);
+
+        log("Searching payment database...");
+
+        simulateProcessing(400);
+
+        synchronized (this) {
+            if (!paymentDetails.containsKey(paymentId)) {
+
+                log("Payment details not found: "
+                        + paymentId);
+
+                return "Payment not found.";
+            }
+
+            log("Payment details retrieved successfully.");
+
+            log("GET PAYMENT DETAILS task completed.");
+
+            return paymentDetails.get(paymentId);
+        }
+    }
+
+    // =========================================================
+    // MAIN
+    // =========================================================
+
+    public static void main(String[] args) {
+
+        final String HOST =
+                "rmi://localhost:1237/PaymentServer";
+
+        try {
+
+            // -------------------------------------------------
+            // Connect to ChargingStationServer
+            // -------------------------------------------------
+
+            ChargingStationInterface chargingStation;
+
+            try {
+
+                chargingStation =
+                        (ChargingStationInterface)
+                        Naming.lookup(
+                                "rmi://localhost:1234//ChargingStationServer"
+                        );
+
+            }
+            catch (Exception e) {
+
+                System.out.println(
+                        "Could not connect to "
+                        + "ChargingStationServer."
+                );
+
+                System.out.println(
+                        "Please start ChargingStationServer "
+                        + "on port 1234."
+                );
+
+                return;
+            }
+
+            // -------------------------------------------------
+            // Connect to ChargingSessionServer
+            // -------------------------------------------------
+
+            ChargingSessionInterface chargingSession;
+
+            try {
+
+                chargingSession =
+                        (ChargingSessionInterface)
+                        Naming.lookup(
+                                "rmi://localhost:1236/ChargingSessionServer"
+                        );
+
+            }
+            catch (Exception e) {
+
+                System.out.println(
+                        "Could not connect to "
+                        + "ChargingSessionServer."
+                );
+
+                System.out.println(
+                        "Please start ChargingSessionServer "
+                        + "on port 1236."
+                );
+
+                return;
+            }
+
+            // -------------------------------------------------
+            // Connect to PricingServer
+            // -------------------------------------------------
+
+            PricingInterface pricing;
+
+            try {
+
+                pricing =
+                        (PricingInterface)
+                        Naming.lookup(
+                                "rmi://localhost:1238/PricingService"
+                        );
+
+            }
+            catch (Exception e) {
+
+                System.out.println(
+                        "Could not connect to PricingServer."
+                );
+
+                System.out.println(
+                        "Please start PricingServer "
+                        + "on port 1238."
+                );
+
+                return;
+            }
+
+            // -------------------------------------------------
+            // Start PaymentServer
+            // -------------------------------------------------
+
+            System.out.println(
+                    "Starting Payment Server.........."
+            );
+
+            PaymentServer server =
+                    new PaymentServer(
+                            chargingSession,
+                            pricing,
+                            chargingStation
+                    );
+
+            System.out.println(
+                    "Payment Server Instance Created......."
+            );
+
+            // Create RMI registry on port 1237
+            LocateRegistry.createRegistry(1237);
+
+            // Bind server to registry
+            Naming.bind(
+                    HOST,
+                    server
+            );
+
+            System.out.println(
+                    "Payment Server bound to registry successfully.."
+            );
+
+            System.out.println(
+                    "Payment Server Ready...."
+            );
+
+            System.out.println(
+                    "Simulated processing delays: ENABLED"
+            );
+
+            System.out.println(
+                    "Waiting for payment requests..."
+            );
+
+        }
+        catch (Exception ex) {
+
+            System.out.println(
+                    "Exception : "
+                    + ex.getMessage()
+            );
+
+            ex.printStackTrace();
+        }
+    }
+}
+
+============================================================
+PricingInterface.java
+============================================================
+
+import java.rmi.Remote;
+import java.rmi.RemoteException;
+
+// Remote interface defining methods for calculating charging price and demand multipliers
+public interface PricingInterface extends Remote {
+
+    // Calculates total cost based on station ID demand and energy consumed in kWh
+    double calculatePrice(
+            String stationId,
+            double energyConsumed
+    ) throws RemoteException;
+
+    // Returns demand multiplier for a specific station (LOW, MEDIUM, HIGH)
+    double getDemandMultiplier(
+            String stationId
+    ) throws RemoteException;
+}
+
+
+============================================================
+PricingServer.java
+============================================================
+
+import java.rmi.Naming;
+import java.rmi.RemoteException;
+import java.rmi.registry.LocateRegistry;
+import java.rmi.server.UnicastRemoteObject;
+import java.util.HashMap;
+import java.util.Map;
+
+// RMI Server implementation for dynamic EV charging price computation
+public class PricingServer extends UnicastRemoteObject
+        implements PricingInterface {
+
+    private static final long serialVersionUID = 1L;
+
+    // Standard rate per kWh
+    private static final double BASE_PRICE = 10.0;
+
+    // Stores station ID -> demand level
+    private Map<String, String> stationDemand;
+
+    // Constructor
+    protected PricingServer() throws RemoteException {
+        super();
+
+        stationDemand = new HashMap<>();
+
+        // Sample station demand levels
+        stationDemand.put("S01", "LOW");
+        stationDemand.put("S02", "MEDIUM");
+        stationDemand.put("S03", "HIGH");
+    }
+
+    // =========================================================
+    // THREAD LOGGING
+    // =========================================================
+
+    private void log(String message) {
+
+        System.out.println(
+                "[Thread-" +
+                Thread.currentThread().getId() +
+                " | " +
+                Thread.currentThread().getName() +
+                "] " +
+                message
+        );
+    }
+
+    // =========================================================
+    // SIMULATED PROCESSING DELAY
+    // =========================================================
+
+    private void simulateProcessing(long milliseconds) {
+
+        try {
+
+            Thread.sleep(milliseconds);
+
+        } catch (InterruptedException e) {
+
+            Thread.currentThread().interrupt();
+
+            log("Thread interrupted during processing.");
+        }
+    }
+
+    // =========================================================
+    // CALCULATE PRICE
+    // =========================================================
+
+    @Override
+    public double calculatePrice(
+            String stationId,
+            double energyConsumed)
+            throws RemoteException {
+
+        log("CALCULATE PRICE request received.");
+        log("Station: " + stationId);
+        log("Energy requested: "
+                + energyConsumed + " kWh");
+
+        // -----------------------------------------------------
+        // Validate energy
+        // -----------------------------------------------------
+
+        log("Validating energy consumption...");
+
+        simulateProcessing(300);
+
+        if (energyConsumed < 0) {
+
+            log("Invalid energy value.");
+
+            return -1;
+        }
+
+        // -----------------------------------------------------
+        // Get demand level
+        // -----------------------------------------------------
+
+        log("Checking demand level for station "
+                + stationId);
+
+        simulateProcessing(500);
+
+        String demand =
+                stationDemand.get(stationId);
+
+        if (demand == null) {
+
+            log("Station not found. "
+                    + "Defaulting demand to LOW.");
+
+            demand = "LOW";
+        }
+
+        log("Demand level: " + demand);
+
+        // -----------------------------------------------------
+        // Determine multiplier
+        // -----------------------------------------------------
+
+        log("Determining demand multiplier...");
+
+        simulateProcessing(400);
+
+        double multiplier;
+
+        switch (demand) {
+
+            case "LOW":
+
+                multiplier = 1.0;
+
+                break;
+
+            case "MEDIUM":
+
+                multiplier = 1.25;
+
+                break;
+
+            case "HIGH":
+
+                multiplier = 1.50;
+
+                break;
+
+            default:
+
+                multiplier = 1.0;
+        }
+
+        log("Base price: Rs. "
+                + BASE_PRICE + "/kWh");
+
+        log("Demand multiplier: "
+                + multiplier);
+
+        // -----------------------------------------------------
+        // Calculate final price
+        // -----------------------------------------------------
+
+        log("Calculating final price...");
+
+        simulateProcessing(500);
+
+        double finalPrice =
+                BASE_PRICE
+                * energyConsumed
+                * multiplier;
+
+        log("Price calculation:");
+
+        log(
+            BASE_PRICE
+            + " * "
+            + energyConsumed
+            + " * "
+            + multiplier
+        );
+
+        log("Final price: Rs. "
+                + finalPrice);
+
+        log("CALCULATE PRICE task completed.");
+
+        return finalPrice;
+    }
+
+    // =========================================================
+    // GET DEMAND MULTIPLIER
+    // =========================================================
+
+    @Override
+    public double getDemandMultiplier(
+            String stationId)
+            throws RemoteException {
+
+        log("GET DEMAND MULTIPLIER request received.");
+        log("Station: " + stationId);
+
+        // -----------------------------------------------------
+        // Look up demand
+        // -----------------------------------------------------
+
+        log("Looking up station demand...");
+
+        simulateProcessing(400);
+
+        String demand =
+                stationDemand.get(stationId);
+
+        if (demand == null) {
+
+            log("Station not found. "
+                    + "Defaulting demand to LOW.");
+
+            demand = "LOW";
+        }
+
+        log("Demand level: " + demand);
+
+        // -----------------------------------------------------
+        // Determine multiplier
+        // -----------------------------------------------------
+
+        log("Calculating demand multiplier...");
+
+        simulateProcessing(400);
+
+        double multiplier;
+
+        switch (demand) {
+
+            case "LOW":
+
+                multiplier = 1.0;
+
+                break;
+
+            case "MEDIUM":
+
+                multiplier = 1.25;
+
+                break;
+
+            case "HIGH":
+
+                multiplier = 1.50;
+
+                break;
+
+            default:
+
+                multiplier = 1.0;
+        }
+
+        log("Returning multiplier: "
+                + multiplier);
+
+        log("GET DEMAND MULTIPLIER task completed.");
+
+        return multiplier;
+    }
+
+    // =========================================================
+    // MAIN
+    // =========================================================
+
+    public static void main(String[] args) {
+
+        try {
+
+            System.out.println(
+                    "Starting Pricing Server..."
+            );
+
+            // Start RMI registry on port 1238
+            LocateRegistry.createRegistry(1238);
+
+            // Create PricingServer instance
+            PricingServer server =
+                    new PricingServer();
+
+            // Bind service
+            Naming.rebind(
+                    "rmi://localhost:1238/PricingService",
+                    server
+            );
+
+            System.out.println(
+                    "================================="
+            );
+
+            System.out.println(
+                    "       PRICING RMI SERVER"
+            );
+
+            System.out.println(
+                    "================================="
+            );
+
+            System.out.println(
+                    "Server started successfully."
+            );
+
+            System.out.println(
+                    "Port: 1238"
+            );
+
+            System.out.println(
+                    "Service: PricingService"
+            );
+
+            System.out.println(
+                    "---------------------------------"
+            );
+
+            System.out.println(
+                    "Stations:"
+            );
+
+            System.out.println(
+                    "S01 -> LOW demand"
+            );
+
+            System.out.println(
+                    "S02 -> MEDIUM demand"
+            );
+
+            System.out.println(
+                    "S03 -> HIGH demand"
+            );
+
+            System.out.println(
+                    "---------------------------------"
+            );
+
+            System.out.println(
+                    "Simulated processing delays: ENABLED"
+            );
+
+            System.out.println(
+                    "Waiting for pricing requests..."
+            );
+
+            System.out.println(
+                    "================================="
+            );
+
+        }
+        catch (Exception e) {
+
+            System.out.println(
+                    "Server Error: "
+                    + e.getMessage()
+            );
+
+            e.printStackTrace();
+        }
+    }
+}
+
+============================================================
+ReservationInterface.java
+============================================================
+
+import java.rmi.Remote;
+import java.rmi.RemoteException;
+
+// Remote interface defining methods for slot booking, cancellation, and retrieval
+public interface ReservationInterface extends Remote {
+
+    // Reserve a slot for a user ID and vehicle ID
+    String reserveSlot(String userId, String vehicleId) throws RemoteException;
+
+    // Cancel an existing reservation using reservation ID
+    String cancelReservation(String reservationId) throws RemoteException;
+
+    // Get reservation details using reservation ID
+    String getReservation(String reservationId) throws RemoteException;
+
+    // Get the charging port ID assigned to a reservation, or "NONE" if not found.
+    // Used by ChargingSessionServer to locate the port for a reservation.
+    String getReservationPort(String reservationId) throws RemoteException;
+}
+
+============================================================
+ReservationServer.java
+============================================================
+
+import java.rmi.Naming;
+import java.rmi.RemoteException;
+import java.rmi.registry.LocateRegistry;
+import java.rmi.server.UnicastRemoteObject;
+import java.util.HashMap;
+import java.util.Map;
+
+// RMI Server class that implements ReservationInterface
+public class ReservationServer extends UnicastRemoteObject
+        implements ReservationInterface {
+
+    private static final long serialVersionUID = 1L;
+
+    // Stores reservation ID -> reservation details string
+    private Map<String, String> reservations;
+
+    // Stores reservation ID -> charging port ID
+    private Map<String, String> reservationPorts;
+
+    // Sequential counter for reservation IDs
+    private int reservationCounter = 1001;
+
+    // Remote reference to ChargingStationServer
+    private ChargingStationInterface chargingStation;
+
+    // Constructor
+    protected ReservationServer(
+            ChargingStationInterface chargingStation)
+            throws RemoteException {
+
+        super();
+
+        reservations = new HashMap<>();
+        reservationPorts = new HashMap<>();
+
+        this.chargingStation = chargingStation;
+    }
+
+    // =========================================================
+    // THREAD LOGGING
+    // =========================================================
+
+    private void log(String message) {
+
+        System.out.println(
+                "[Thread-" +
+                Thread.currentThread().getId() +
+                " | " +
+                Thread.currentThread().getName() +
+                "] " +
+                message
+        );
+    }
+
+    // =========================================================
+    // SIMULATED PROCESSING DELAY
+    // =========================================================
+
+    private void simulateProcessing(long milliseconds) {
+
+        try {
+
+            Thread.sleep(milliseconds);
+
+        } catch (InterruptedException e) {
+
+            Thread.currentThread().interrupt();
+
+            log("Thread interrupted during processing.");
+        }
+    }
+
+    // =========================================================
+    // RESERVE SLOT
+    // =========================================================
+
+    // IMPORTANT:
+    // This method is intentionally NOT synchronized.
+    //
+    // This allows multiple EV clients to enter the method
+    // concurrently.
+    //
+    // The actual shared charging-port resource is protected
+    // by ChargingStationServer.reserveAnyAvailablePort(),
+    // which remains synchronized.
+    //
+    @Override
+    public String reserveSlot(
+            String userId,
+            String vehicleId)
+            throws RemoteException {
+
+        log("========================================");
+        log("RESERVE SLOT request received.");
+        log("User ID: " + userId);
+        log("Vehicle ID: " + vehicleId);
+
+        // -----------------------------------------------------
+        // Validate input
+        // -----------------------------------------------------
+
+        log("Validating user and vehicle information...");
+
+        simulateProcessing(500);
+
+        if (userId == null ||
+                userId.trim().isEmpty()) {
+
+            log("Reservation failed: Invalid User ID.");
+
+            return "Reservation failed: Invalid User ID.";
+        }
+
+        if (vehicleId == null ||
+                vehicleId.trim().isEmpty()) {
+
+            log("Reservation failed: Invalid Vehicle ID.");
+
+            return "Reservation failed: Invalid Vehicle ID.";
+        }
+
+        // -----------------------------------------------------
+        // Ask ChargingStationServer for a port
+        // -----------------------------------------------------
+
+        log("Contacting ChargingStationServer.");
+
+        log("Requesting any available charging port...");
+
+        String portId;
+
+        try {
+
+            // IMPORTANT:
+            // ChargingStationServer handles synchronization
+            // for the shared charging ports.
+            //
+            // Multiple ReservationServer threads can reach
+            // this call concurrently, but the station will
+            // ensure that two threads cannot reserve the same
+            // port.
+
+            portId =
+                    chargingStation.reserveAnyAvailablePort();
+
+            log("ChargingStationServer returned: "
+                    + portId);
+
+        } catch (RemoteException e) {
+
+            log("ChargingStationServer is unavailable.");
+
+            return "Reservation failed: "
+                    + "ChargingStationServer is unavailable ("
+                    + e.getMessage()
+                    + ").";
+        }
+
+        // -----------------------------------------------------
+        // Check if a port was available
+        // -----------------------------------------------------
+
+        if (portId == null ||
+                portId.equals("NONE")) {
+
+            log("No charging ports are available.");
+
+            return "Reservation failed: "
+                    + "No charging ports available.";
+        }
+
+        log("Charging port successfully allocated: "
+                + portId);
+
+        // -----------------------------------------------------
+        // Simulate reservation processing
+        // -----------------------------------------------------
+
+        log("Processing reservation request...");
+
+        simulateProcessing(700);
+
+        // -----------------------------------------------------
+        // Generate reservation ID
+        // -----------------------------------------------------
+
+        String reservationId;
+
+        /*
+         * Only the shared counter needs synchronization.
+         *
+         * We do NOT synchronize the entire method because
+         * doing that would make all EV requests wait for one
+         * another.
+         */
+        synchronized (this) {
+
+            reservationId =
+                    "RES" + reservationCounter++;
+
+            log("Generated Reservation ID: "
+                    + reservationId);
+        }
+
+        // -----------------------------------------------------
+        // Create reservation details
+        // -----------------------------------------------------
+
+        String reservationDetails =
+                "Reservation ID: " + reservationId +
+                ", User ID: " + userId +
+                ", Vehicle ID: " + vehicleId +
+                ", Port: " + portId +
+                ", Status: CONFIRMED";
+
+        log("Creating reservation record...");
+
+        simulateProcessing(500);
+
+        // -----------------------------------------------------
+        // Store reservation
+        // -----------------------------------------------------
+
+        /*
+         * HashMap is not thread-safe.
+         *
+         * Therefore the shared maps are protected with a
+         * small synchronized block.
+         *
+         * The rest of the method remains concurrent.
+         */
+        synchronized (this) {
+
+            reservations.put(
+                    reservationId,
+                    reservationDetails
+            );
+
+            reservationPorts.put(
+                    reservationId,
+                    portId
+            );
+
+            log("Reservation stored successfully.");
+
+            log("Reservation ID: "
+                    + reservationId);
+
+            log("Assigned Port: "
+                    + portId);
+        }
+
+        log("RESERVE SLOT task completed.");
+        log("========================================");
+
+        return "Reservation successful!\n"
+                + reservationDetails;
+    }
+
+    // =========================================================
+    // CANCEL RESERVATION
+    // =========================================================
+
+    @Override
+    public String cancelReservation(
+            String reservationId)
+            throws RemoteException {
+
+        log("CANCEL RESERVATION request received.");
+
+        log("Reservation ID: "
+                + reservationId);
+
+        // -----------------------------------------------------
+        // Check reservation
+        // -----------------------------------------------------
+
+        log("Checking reservation...");
+
+        simulateProcessing(500);
+
+        String portId = null;
+        boolean found = false;
+
+        synchronized (this) {
+            if (reservations.containsKey(reservationId)) {
+                found = true;
+                portId = reservationPorts.remove(reservationId);
+                reservations.remove(reservationId);
+            }
+        }
+
+        if (found) {
+
+            log("Reservation found and removed from database.");
+            log("Assigned port: " + portId);
+
+            // -------------------------------------------------
+            // Release port
+            // -------------------------------------------------
+
+            if (portId != null) {
+
+                log("Contacting ChargingStationServer "
+                        + "to release port "
+                        + portId);
+
+                simulateProcessing(500);
+
+                try {
+
+                    String releaseResult =
+                            chargingStation.releasePort(
+                                    portId
+                            );
+
+                    log("ChargingStationServer response: "
+                            + releaseResult);
+
+                } catch (RemoteException e) {
+
+                    log("WARNING: Could not release port "
+                            + portId);
+
+                    System.out.println(
+                            "Warning: could not release port "
+                            + portId
+                            + " on ChargingStationServer: "
+                            + e.getMessage()
+                    );
+                }
+            }
+
+            log("CANCEL RESERVATION task completed.");
+
+            return "Reservation "
+                    + reservationId
+                    + " cancelled successfully.";
+        }
+
+        log("Reservation not found.");
+
+        return "Reservation "
+                + reservationId
+                + " not found.";
+    }
+
+    // =========================================================
+    // GET RESERVATION
+    // =========================================================
+
+    @Override
+    public String getReservation(
+            String reservationId)
+            throws RemoteException {
+
+        log("GET RESERVATION request received.");
+
+        log("Reservation ID: "
+                + reservationId);
+
+        log("Searching reservation database...");
+
+        simulateProcessing(400);
+
+        synchronized (this) {
+            if (reservations.containsKey(reservationId)) {
+
+                log("Reservation found.");
+
+                String details =
+                        reservations.get(
+                                reservationId
+                        );
+
+                log("Returning reservation details.");
+
+                log("GET RESERVATION task completed.");
+
+                return details;
+            }
+        }
+
+        log("Reservation not found.");
+
+        return "Reservation "
+                + reservationId
+                + " not found.";
+    }
+
+    // =========================================================
+    // GET RESERVATION PORT
+    // =========================================================
+
+    @Override
+    public String getReservationPort(
+            String reservationId)
+            throws RemoteException {
+
+        log("GET RESERVATION PORT request received.");
+
+        log("Reservation ID: "
+                + reservationId);
+
+        log("Searching assigned port...");
+
+        simulateProcessing(400);
+
+        synchronized (this) {
+            String portId =
+                    reservationPorts.get(
+                            reservationId
+                    );
+
+            if (portId == null) {
+
+                log("No port associated with reservation.");
+
+                return "NONE";
+            }
+
+            log("Reservation is assigned to port: "
+                    + portId);
+
+            log("GET RESERVATION PORT task completed.");
+
+            return portId;
+        }
+    }
+
+    // =========================================================
+    // MAIN
+    // =========================================================
+
+    public static void main(String[] args) {
+
+        try {
+
+            // -------------------------------------------------
+            // Connect to ChargingStationServer
+            // -------------------------------------------------
+
+            ChargingStationInterface chargingStation;
+
+            try {
+
+                chargingStation =
+                        (ChargingStationInterface)
+                        Naming.lookup(
+                                "rmi://localhost:1234//ChargingStationServer"
+                        );
+
+            } catch (Exception e) {
+
+                System.out.println(
+                        "Could not connect to "
+                        + "ChargingStationServer."
+                );
+
+                System.out.println(
+                        "Please start ChargingStationServer "
+                        + "on port 1234."
+                );
+
+                return;
+            }
+
+            // -------------------------------------------------
+            // Create RMI registry
+            // -------------------------------------------------
+
+            LocateRegistry.createRegistry(1235);
+
+            // -------------------------------------------------
+            // Create server
+            // -------------------------------------------------
+
+            ReservationServer server =
+                    new ReservationServer(
+                            chargingStation
+                    );
+
+            // -------------------------------------------------
+            // Bind server
+            // -------------------------------------------------
+
+            Naming.rebind(
+                    "rmi://localhost:1235/ReservationService",
+                    server
+            );
+
+            // -------------------------------------------------
+            // Server information
+            // -------------------------------------------------
+
+            System.out.println(
+                    "================================="
+            );
+
+            System.out.println(
+                    "   RESERVATION RMI SERVER"
+            );
+
+            System.out.println(
+                    "================================="
+            );
+
+            System.out.println(
+                    "Server started successfully."
+            );
+
+            System.out.println(
+                    "Port: 1235"
+            );
+
+            System.out.println(
+                    "Service: ReservationService"
+            );
+
+            System.out.println(
+                    "Connected to ChargingStationServer "
+                    + "on port 1234"
+            );
+
+            System.out.println(
+                    "---------------------------------"
+            );
+
+            System.out.println(
+                    "Concurrent reservation processing: ENABLED"
+            );
+
+            System.out.println(
+                    "Port synchronization: "
+                    + "ChargingStationServer"
+            );
+
+            System.out.println(
+                    "Simulated processing delays: ENABLED"
+            );
+
+            System.out.println(
+                    "Waiting for reservation requests..."
+            );
+
+            System.out.println(
+                    "================================="
+            );
+
+        } catch (Exception e) {
+
+            System.out.println(
+                    "Server Error: "
+                    + e.getMessage()
+            );
+
+            e.printStackTrace();
+        }
+    }
+}
+
