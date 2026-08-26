@@ -1,146 +1,88 @@
-# Docker Deployment Guide — EV Charging Network Management System
+# Docker & Networking Deployment Guide
 
-This document describes the Docker architecture, container networking, port allocations, startup dependencies, and operational commands for the Java RMI EV Charging Network Management System.
+This document describes the Dockerized architecture, `libfaketime` physical clock simulation, port mappings, and container verification commands.
 
 ---
 
-## Architecture Overview
+## 🐳 Docker Services Architecture
 
-The application is deployed across 5 isolated containers connected via a dedicated bridge network (`ev-rmi-network`).
+The system runs 6 microservices on the `ev-rmi-network` bridge driver:
 
-```
-+-----------------------------------------------------------------------------------+
-|                                  WINDOWS HOST                                     |
-|                                                                                   |
-|   +-----------------------+                    +------------------------------+   |
-|   |     EVClient.java     |                    |    MultithreadTest.java      |   |
-|   +-----------+-----------+                    +--------------+---------------+   |
-|               | (Host RMI Lookups to localhost:1234-1238) |                       |
-+---------------+-----------------------------------------------+-------------------+
-                |                                               |
-                v                                               v
-+-----------------------------------------------------------------------------------+
-|                        DOCKER NETWORK (ev-rmi-network)                            |
-|                                                                                   |
-|  +------------------------+  (Port 1234/2234)  +-----------------------------+  |
-|  |    charging-station    | <------------------ |         reservation         |  |
-|  +-----------+------------+                     +--------------+--------------+  |
-|              ^                                                 ^                 |
-|              |                                                 |                 |
-|              +-------------------------+                       |                 |
-|              |                         |                       |                 |
-|              v                         v                       v                 |
-|  +-----------+------------+  (Port 1238/2238)  +--------------+--------------+  |
-|  |        pricing         | <------------------ |      charging-session       |  |
-|  +-----------+------------+                     +--------------+--------------+  |
-|              ^                                                 ^                 |
-|              |                                                 |                 |
-|              +-------------------+   +-------------------------+                 |
-|                                  |   |                                           |
-|                                  v   v                                           |
-|                             +----+---+----------------+                          |
-|                             |         payment         |                          |
-|                             +-------------------------+                          |
-+-----------------------------------------------------------------------------------+
+1. **`time-server`**: Reference physical clock server.
+2. **`charging-station`**: Manages charging ports P1-P4.
+3. **`pricing`**: Dynamic pricing calculation.
+4. **`reservation`**: Slot booking management.
+5. **`charging-session`**: Session tracking & energy metering.
+6. **`payment`**: Payment processing & post-payment port release.
+
+---
+
+## ⏱️ `libfaketime` Physical Clock Simulation
+
+Physical clock skews across Docker containers are simulated using `libfaketime`:
+- **Dockerfile**: Installs `libfaketime` package via `apt-get install -y libfaketime`.
+- **Preload**: `LD_PRELOAD=/usr/lib/x86_64-linux-gnu/faketime/libfaketime.so.1`.
+- **Environment Variable**: `FAKETIME` configures fixed/simulated initial physical timestamps per container:
+
+```yaml
+  charging-station:
+    environment:
+      - LD_PRELOAD=/usr/lib/x86_64-linux-gnu/faketime/libfaketime.so.1
+      - FAKETIME=@2026-08-26 15:30:10
+
+  reservation:
+    environment:
+      - LD_PRELOAD=/usr/lib/x86_64-linux-gnu/faketime/libfaketime.so.1
+      - FAKETIME=@2026-08-26 15:30:05
 ```
 
 ---
 
-## Docker Services & Port Mapping Table
+## 🔌 RMI Port Mapping Reference
 
-| Service Name | Container Name | Registry Port (Container/Host) | Remote Object Port (Container/Host) | Environment / Service Host Setup |
-|--------------|----------------|-------------------------------|-------------------------------------|-----------------------------------|
-| `charging-station` | `charging-station` | `1234` : `1234` | `2234` : `2234` | `RMI_SERVER_HOST=charging-station` |
-| `reservation` | `reservation` | `1235` : `1235` | `2235` : `2235` | `STATION_HOST=charging-station` |
-| `charging-session` | `charging-session` | `1236` : `1236` | `2236` : `2236` | `STATION_HOST=charging-station`, `RESERVATION_HOST=reservation` |
-| `payment` | `payment` | `1237` : `1237` | `2237` : `2237` | `STATION_HOST=charging-station`, `SESSION_HOST=charging-session`, `PRICING_HOST=pricing` |
-| `pricing` | `pricing` | `1238` : `1238` | `2238` : `2238` | `RMI_SERVER_HOST=pricing` |
-
----
-
-## Startup Dependencies & Retry Mechanism
-
-1. **ChargingStationServer**: Independent (starts first).
-2. **PricingServer**: Independent (starts first).
-3. **ReservationServer**: Connects to `ChargingStationServer` (`charging-station:1234`).
-4. **ChargingSessionServer**: Connects to `ChargingStationServer` (`charging-station:1234`) and `ReservationServer` (`reservation:1235`).
-5. **PaymentServer**: Connects to `ChargingStationServer` (`charging-station:1234`), `ChargingSessionServer` (`charging-session:1236`), and `PricingServer` (`pricing:1238`).
-
-### Retry Mechanism
-Every dependent server uses an automatic retry loop (10 retries with 2-second sleep intervals):
-```
-Connecting to ChargingStationServer at rmi://charging-station:1234//ChargingStationServer...
-Waiting for ChargingStationServer...
-Retry 1/10...
-ChargingStationServer connected.
-```
+| Service Name | Container Name | Registry Port | Remote Object Port | Host Port Mapping |
+|--------------|----------------|---------------|-------------------|-------------------|
+| `time-server` | `time-server` | 1239 | 2239 | `1239:1239`, `2239:2239` |
+| `charging-station` | `charging-station` | 1234 | 2234 | `1234:1234`, `2234:2234` |
+| `reservation` | `reservation` | 1235 | 2235 | `1235:1235`, `2235:2235` |
+| `charging-session` | `charging-session` | 1236 | 2236 | `1236:1236`, `2236:2236` |
+| `payment` | `payment` | 1237 | 2237 | `1237:1237`, `2237:2237` |
+| `pricing` | `pricing` | 1238 | 2238 | `1238:1238`, `2238:2238` |
 
 ---
 
-## Host vs. Container Communication
+## 🛠️ Operational Commands
 
-### Container-to-Container Communication
-- Uses Docker service names over `ev-rmi-network` (e.g. `rmi://charging-station:1234//ChargingStationServer`).
-- Exported Remote Objects communicate over explicit Remote Object ports (`2234`-`2238`).
-
-### Host-to-Container Communication
-- Host clients (`EVClient` and `MultithreadTest`) connect to containers via published ports on `localhost` (e.g. `rmi://localhost:1234//ChargingStationServer`).
-- If container RMI stubs export service names (e.g. `charging-station`), the Windows host can resolve them by mapping service names to `127.0.0.1` in `C:\Windows\System32\drivers\etc\hosts`:
-  ```
-  127.0.0.1 charging-station reservation charging-session pricing payment
-  ```
-
----
-
-## Operational Commands
-
-### 1. Build Docker Images
+### Build Containers
 ```powershell
 docker compose build
 ```
 
-### 2. Start Containers (Detached Mode)
+### Start Services in Detached Mode
 ```powershell
 docker compose up -d
 ```
 
-### 3. Check Running Containers
+### Verify Running Container Services
 ```powershell
 docker compose ps
 ```
 
-### 4. View Container Logs
+### View Live Logs
 ```powershell
 docker compose logs -f
-# Or view logs for a specific service:
-docker compose logs charging-station
+docker compose logs time-server
 docker compose logs reservation
-docker compose logs charging-session
-docker compose logs pricing
-docker compose logs payment
 ```
 
-### 5. Run Host Clients
+### Verify Container Simulated Dates (`libfaketime`)
 ```powershell
-# Compile Java source code
-javac -d bin ChargingStation/*.java Reservation/*.java ChargingSession/*.java Pricing/*.java Payment/*.java EVClient.java MultithreadTest.java
-
-# Run interactive client
-java -cp bin EVClient
-
-# Run multithreaded test client
-java -cp bin MultithreadTest
+docker compose exec reservation date
+docker compose exec charging-station date
+docker compose exec time-server date
 ```
 
-### 6. Stop Containers
+### Shutdown Services
 ```powershell
 docker compose down
 ```
-
----
-
-## Troubleshooting
-
-- **Connection Refused during startup**: Dependent containers automatically retry until upstream RMI registries are active. Check container logs (`docker compose logs <service>`) to verify connection status.
-- **UnknownHostException on Host**: Ensure host port publishing is active (`docker compose ps`) and verify service name resolution in `C:\Windows\System32\drivers\etc\hosts`.
-- **RMI Port Conflict**: Ensure no local Java RMI registries are already running on ports 1234-1238 or 2234-2238 before running `docker compose up`.

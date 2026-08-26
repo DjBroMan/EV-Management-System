@@ -4,12 +4,20 @@ import java.rmi.registry.LocateRegistry;
 import java.rmi.server.UnicastRemoteObject;
 import java.util.HashMap;
 import java.util.Map;
+import Clock.LogicalClock;
+import Clock.PhysicalClock;
+import Clock.CristianClient;
+import Clock.DistributedLogger;
+import Clock.LamportResult;
 
 // RMI Server class that implements ReservationInterface
 public class ReservationServer extends UnicastRemoteObject
         implements ReservationInterface {
 
     private static final long serialVersionUID = 1L;
+    private static final String SERVER_NAME = "ReservationServer";
+
+    private final LogicalClock logicalClock = new LogicalClock();
 
     // Stores reservation ID -> reservation details string
     private Map<String, String> reservations;
@@ -36,37 +44,40 @@ public class ReservationServer extends UnicastRemoteObject
         this.chargingStation = chargingStation;
     }
 
-    // =========================================================
-    // THREAD LOGGING
-    // =========================================================
-
     private void log(String message) {
-
-        System.out.println(
-                "[Thread-" +
-                Thread.currentThread().getId() +
-                " | " +
-                Thread.currentThread().getName() +
-                "] " +
-                message
-        );
+        DistributedLogger.log(SERVER_NAME, logicalClock, message);
     }
 
-    // =========================================================
-    // SIMULATED PROCESSING DELAY
-    // =========================================================
+    private void log(String eventType, String message) {
+        DistributedLogger.log(SERVER_NAME, logicalClock, eventType, message);
+    }
 
     private void simulateProcessing(long milliseconds) {
-
         try {
-
             Thread.sleep(milliseconds);
-
         } catch (InterruptedException e) {
-
             Thread.currentThread().interrupt();
-
             log("Thread interrupted during processing.");
+        }
+    }
+
+    @Override
+    public String synchronizeClock() throws RemoteException {
+        logicalClock.tick();
+        log("LOCAL", "Initiating Cristian Physical Clock Synchronization...");
+        String timeServerHost = System.getenv("TIME_SERVER_HOST");
+        if (timeServerHost == null || timeServerHost.trim().isEmpty()) {
+            timeServerHost = "localhost";
+        }
+        String timeServerUrl = "rmi://" + timeServerHost + ":1239/TimeServer";
+        CristianClient.SyncResult res = CristianClient.synchronize(SERVER_NAME, timeServerUrl);
+        logicalClock.tick();
+        if (res.success) {
+            log("LOCAL", "Clock synchronization completed successfully. Calculated offset: " + res.clockOffsetMs + " ms");
+            return "Clock synchronized successfully. Offset: " + res.clockOffsetMs + " ms";
+        } else {
+            log("LOCAL", "Clock synchronization failed: " + res.errorMessage);
+            return "Clock synchronization failed: " + res.errorMessage;
         }
     }
 
@@ -74,137 +85,63 @@ public class ReservationServer extends UnicastRemoteObject
     // RESERVE SLOT
     // =========================================================
 
-    // IMPORTANT:
-    // This method is intentionally NOT synchronized.
-    //
-    // This allows multiple EV clients to enter the method
-    // concurrently.
-    //
-    // The actual shared charging-port resource is protected
-    // by ChargingStationServer.reserveAnyAvailablePort(),
-    // which remains synchronized.
-    //
     @Override
-    public String reserveSlot(
+    public String reserveSlot(String userId, String vehicleId) throws RemoteException {
+        return reserveSlot(userId, vehicleId, 0).getData();
+    }
+
+    @Override
+    public LamportResult<String> reserveSlot(
             String userId,
-            String vehicleId)
+            String vehicleId,
+            long clientLamport)
             throws RemoteException {
 
-        log("========================================");
-        log("RESERVE SLOT request received.");
-        log("User ID: " + userId);
-        log("Vehicle ID: " + vehicleId);
-
-        // -----------------------------------------------------
-        // Validate input
-        // -----------------------------------------------------
-
-        log("Validating user and vehicle information...");
+        long recvL = logicalClock.receiveEvent(clientLamport);
+        log("RECEIVE", "RESERVE SLOT request received from User " + userId + ", Vehicle " + vehicleId + " (Client Lamport: " + clientLamport + "). Clock updated to " + recvL);
 
         simulateProcessing(500);
 
-        if (userId == null ||
-                userId.trim().isEmpty()) {
-
-            log("Reservation failed: Invalid User ID.");
-
-            return "Reservation failed: Invalid User ID.";
+        if (userId == null || userId.trim().isEmpty()) {
+            log("LOCAL", "Reservation failed: Invalid User ID.");
+            long respL = logicalClock.sendEvent();
+            return new LamportResult<>("Reservation failed: Invalid User ID.", respL);
         }
 
-        if (vehicleId == null ||
-                vehicleId.trim().isEmpty()) {
-
-            log("Reservation failed: Invalid Vehicle ID.");
-
-            return "Reservation failed: Invalid Vehicle ID.";
+        if (vehicleId == null || vehicleId.trim().isEmpty()) {
+            log("LOCAL", "Reservation failed: Invalid Vehicle ID.");
+            long respL = logicalClock.sendEvent();
+            return new LamportResult<>("Reservation failed: Invalid Vehicle ID.", respL);
         }
 
-        // -----------------------------------------------------
-        // Ask ChargingStationServer for a port
-        // -----------------------------------------------------
+        long sendL = logicalClock.sendEvent();
+        log("SEND", "Contacting ChargingStationServer.reserveAnyAvailablePort (Lamport: " + sendL + ")");
 
-        log("Contacting ChargingStationServer.");
-
-        log("Requesting any available charging port...");
-
-        String portId;
-
+        LamportResult<String> stationRes;
         try {
-
-            // IMPORTANT:
-            // ChargingStationServer handles synchronization
-            // for the shared charging ports.
-            //
-            // Multiple ReservationServer threads can reach
-            // this call concurrently, but the station will
-            // ensure that two threads cannot reserve the same
-            // port.
-
-            portId =
-                    chargingStation.reserveAnyAvailablePort();
-
-            log("ChargingStationServer returned: "
-                    + portId);
-
+            stationRes = chargingStation.reserveAnyAvailablePort(sendL);
+            logicalClock.receiveEvent(stationRes.getTimestamp());
+            log("RECEIVE", "ChargingStationServer returned port " + stationRes.getData() + " (Station Lamport: " + stationRes.getTimestamp() + ")");
         } catch (RemoteException e) {
-
-            log("ChargingStationServer is unavailable.");
-
-            return "Reservation failed: "
-                    + "ChargingStationServer is unavailable ("
-                    + e.getMessage()
-                    + ").";
+            log("LOCAL", "ChargingStationServer is unavailable.");
+            long respL = logicalClock.sendEvent();
+            return new LamportResult<>("Reservation failed: ChargingStationServer is unavailable (" + e.getMessage() + ").", respL);
         }
 
-        // -----------------------------------------------------
-        // Check if a port was available
-        // -----------------------------------------------------
-
-        if (portId == null ||
-                portId.equals("NONE")) {
-
-            log("No charging ports are available.");
-
-            return "Reservation failed: "
-                    + "No charging ports available.";
+        String portId = stationRes.getData();
+        if (portId == null || portId.equals("NONE")) {
+            log("LOCAL", "No charging ports are available.");
+            long respL = logicalClock.sendEvent();
+            return new LamportResult<>("Reservation failed: No charging ports available.", respL);
         }
 
-        log("Charging port successfully allocated: "
-                + portId);
-
-        // -----------------------------------------------------
-        // Simulate reservation processing
-        // -----------------------------------------------------
-
-        log("Processing reservation request...");
-
+        log("LOCAL", "Charging port successfully allocated: " + portId + ". Processing reservation...");
         simulateProcessing(700);
 
-        // -----------------------------------------------------
-        // Generate reservation ID
-        // -----------------------------------------------------
-
         String reservationId;
-
-        /*
-         * Only the shared counter needs synchronization.
-         *
-         * We do NOT synchronize the entire method because
-         * doing that would make all EV requests wait for one
-         * another.
-         */
         synchronized (this) {
-
-            reservationId =
-                    "RES" + reservationCounter++;
-
-            log("Generated Reservation ID: "
-                    + reservationId);
+            reservationId = "RES" + reservationCounter++;
         }
-
-        // -----------------------------------------------------
-        // Create reservation details
-        // -----------------------------------------------------
 
         String reservationDetails =
                 "Reservation ID: " + reservationId +
@@ -213,48 +150,20 @@ public class ReservationServer extends UnicastRemoteObject
                 ", Port: " + portId +
                 ", Status: CONFIRMED";
 
-        log("Creating reservation record...");
-
         simulateProcessing(500);
 
-        // -----------------------------------------------------
-        // Store reservation
-        // -----------------------------------------------------
-
-        /*
-         * HashMap is not thread-safe.
-         *
-         * Therefore the shared maps are protected with a
-         * small synchronized block.
-         *
-         * The rest of the method remains concurrent.
-         */
         synchronized (this) {
-
-            reservations.put(
-                    reservationId,
-                    reservationDetails
-            );
-
-            reservationPorts.put(
-                    reservationId,
-                    portId
-            );
-
-            log("Reservation stored successfully.");
-
-            log("Reservation ID: "
-                    + reservationId);
-
-            log("Assigned Port: "
-                    + portId);
+            reservations.put(reservationId, reservationDetails);
+            reservationPorts.put(reservationId, portId);
+            logicalClock.tick();
+            log("LOCAL", "Reservation RES" + reservationId + " stored successfully.");
         }
 
-        log("RESERVE SLOT task completed.");
-        log("========================================");
+        String result = "Reservation successful!\n" + reservationDetails;
+        long respL = logicalClock.sendEvent();
+        log("SEND", "Returning RESERVE SLOT response to client (Lamport: " + respL + ")");
 
-        return "Reservation successful!\n"
-                + reservationDetails;
+        return new LamportResult<>(result, respL);
     }
 
     // =========================================================
@@ -262,20 +171,18 @@ public class ReservationServer extends UnicastRemoteObject
     // =========================================================
 
     @Override
-    public String cancelReservation(
-            String reservationId)
+    public String cancelReservation(String reservationId) throws RemoteException {
+        return cancelReservation(reservationId, 0).getData();
+    }
+
+    @Override
+    public LamportResult<String> cancelReservation(
+            String reservationId,
+            long clientLamport)
             throws RemoteException {
 
-        log("CANCEL RESERVATION request received.");
-
-        log("Reservation ID: "
-                + reservationId);
-
-        // -----------------------------------------------------
-        // Check reservation
-        // -----------------------------------------------------
-
-        log("Checking reservation...");
+        long recvL = logicalClock.receiveEvent(clientLamport);
+        log("RECEIVE", "CANCEL RESERVATION request for ID " + reservationId + " received (Client Lamport: " + clientLamport + "). Clock updated to " + recvL);
 
         simulateProcessing(500);
 
@@ -291,58 +198,31 @@ public class ReservationServer extends UnicastRemoteObject
         }
 
         if (found) {
-
-            log("Reservation found and removed from database.");
-            log("Assigned port: " + portId);
-
-            // -------------------------------------------------
-            // Release port
-            // -------------------------------------------------
+            log("LOCAL", "Reservation found and removed from database. Assigned port: " + portId);
 
             if (portId != null) {
-
-                log("Contacting ChargingStationServer "
-                        + "to release port "
-                        + portId);
-
-                simulateProcessing(500);
+                long sendL = logicalClock.sendEvent();
+                log("SEND", "Contacting ChargingStationServer.releasePort for port " + portId + " (Lamport: " + sendL + ")");
 
                 try {
-
-                    String releaseResult =
-                            chargingStation.releasePort(
-                                    portId
-                            );
-
-                    log("ChargingStationServer response: "
-                            + releaseResult);
-
+                    LamportResult<String> releaseRes = chargingStation.releasePort(portId, sendL);
+                    logicalClock.receiveEvent(releaseRes.getTimestamp());
+                    log("RECEIVE", "ChargingStationServer release response: " + releaseRes.getData() + " (Station Lamport: " + releaseRes.getTimestamp() + ")");
                 } catch (RemoteException e) {
-
-                    log("WARNING: Could not release port "
-                            + portId);
-
-                    System.out.println(
-                            "Warning: could not release port "
-                            + portId
-                            + " on ChargingStationServer: "
-                            + e.getMessage()
-                    );
+                    log("LOCAL", "WARNING: Could not release port " + portId + " on ChargingStationServer");
                 }
             }
 
-            log("CANCEL RESERVATION task completed.");
-
-            return "Reservation "
-                    + reservationId
-                    + " cancelled successfully.";
+            String result = "Reservation " + reservationId + " cancelled successfully.";
+            long respL = logicalClock.sendEvent();
+            log("SEND", "Returning CANCEL RESERVATION response to client (Lamport: " + respL + ")");
+            return new LamportResult<>(result, respL);
         }
 
-        log("Reservation not found.");
-
-        return "Reservation "
-                + reservationId
-                + " not found.";
+        String result = "Reservation " + reservationId + " not found.";
+        long respL = logicalClock.sendEvent();
+        log("SEND", "Returning CANCEL RESERVATION response to client (Lamport: " + respL + ")");
+        return new LamportResult<>(result, respL);
     }
 
     // =========================================================
@@ -350,42 +230,37 @@ public class ReservationServer extends UnicastRemoteObject
     // =========================================================
 
     @Override
-    public String getReservation(
-            String reservationId)
+    public String getReservation(String reservationId) throws RemoteException {
+        return getReservation(reservationId, 0).getData();
+    }
+
+    @Override
+    public LamportResult<String> getReservation(
+            String reservationId,
+            long clientLamport)
             throws RemoteException {
 
-        log("GET RESERVATION request received.");
-
-        log("Reservation ID: "
-                + reservationId);
-
-        log("Searching reservation database...");
+        long recvL = logicalClock.receiveEvent(clientLamport);
+        log("RECEIVE", "GET RESERVATION request for ID " + reservationId + " received (Client Lamport: " + clientLamport + "). Clock updated to " + recvL);
 
         simulateProcessing(400);
 
         synchronized (this) {
             if (reservations.containsKey(reservationId)) {
+                String details = reservations.get(reservationId);
+                logicalClock.tick();
+                log("LOCAL", "Reservation details found: " + details);
 
-                log("Reservation found.");
-
-                String details =
-                        reservations.get(
-                                reservationId
-                        );
-
-                log("Returning reservation details.");
-
-                log("GET RESERVATION task completed.");
-
-                return details;
+                long respL = logicalClock.sendEvent();
+                log("SEND", "Returning GET RESERVATION response (Lamport: " + respL + ")");
+                return new LamportResult<>(details, respL);
             }
         }
 
-        log("Reservation not found.");
-
-        return "Reservation "
-                + reservationId
-                + " not found.";
+        String result = "Reservation " + reservationId + " not found.";
+        long respL = logicalClock.sendEvent();
+        log("SEND", "Returning GET RESERVATION response (Lamport: " + respL + ")");
+        return new LamportResult<>(result, respL);
     }
 
     // =========================================================
@@ -393,38 +268,33 @@ public class ReservationServer extends UnicastRemoteObject
     // =========================================================
 
     @Override
-    public String getReservationPort(
-            String reservationId)
+    public String getReservationPort(String reservationId) throws RemoteException {
+        return getReservationPort(reservationId, 0).getData();
+    }
+
+    @Override
+    public LamportResult<String> getReservationPort(
+            String reservationId,
+            long clientLamport)
             throws RemoteException {
 
-        log("GET RESERVATION PORT request received.");
-
-        log("Reservation ID: "
-                + reservationId);
-
-        log("Searching assigned port...");
+        long recvL = logicalClock.receiveEvent(clientLamport);
+        log("RECEIVE", "GET RESERVATION PORT request for ID " + reservationId + " received (Client Lamport: " + clientLamport + "). Clock updated to " + recvL);
 
         simulateProcessing(400);
 
         synchronized (this) {
-            String portId =
-                    reservationPorts.get(
-                            reservationId
-                    );
-
+            String portId = reservationPorts.get(reservationId);
             if (portId == null) {
-
-                log("No port associated with reservation.");
-
-                return "NONE";
+                portId = "NONE";
             }
 
-            log("Reservation is assigned to port: "
-                    + portId);
+            logicalClock.tick();
+            log("LOCAL", "Reservation ID " + reservationId + " is assigned to port: " + portId);
 
-            log("GET RESERVATION PORT task completed.");
-
-            return portId;
+            long respL = logicalClock.sendEvent();
+            log("SEND", "Returning GET RESERVATION PORT response " + portId + " (Lamport: " + respL + ")");
+            return new LamportResult<>(portId, respL);
         }
     }
 
@@ -433,17 +303,11 @@ public class ReservationServer extends UnicastRemoteObject
     // =========================================================
 
     public static void main(String[] args) {
-
         try {
-
             String rmiHost = System.getenv("RMI_SERVER_HOST");
             if (rmiHost != null && !rmiHost.trim().isEmpty()) {
                 System.setProperty("java.rmi.server.hostname", rmiHost);
             }
-
-            // -------------------------------------------------
-            // Connect to ChargingStationServer
-            // -------------------------------------------------
 
             String stationUrl = System.getenv("STATION_URL");
             if (stationUrl == null || stationUrl.trim().isEmpty()) {
@@ -462,128 +326,41 @@ public class ReservationServer extends UnicastRemoteObject
 
             while (retryCount < maxRetries) {
                 try {
-                    chargingStation =
-                            (ChargingStationInterface)
-                            Naming.lookup(stationUrl);
+                    chargingStation = (ChargingStationInterface) Naming.lookup(stationUrl);
                     System.out.println("ChargingStationServer connected.");
                     break;
                 } catch (Exception e) {
                     retryCount++;
-                    System.out.println("Waiting for ChargingStationServer...");
-                    System.out.println("Retry " + retryCount + "/" + maxRetries + "...");
-                    try {
-                        Thread.sleep(2000);
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                        break;
-                    }
+                    System.out.println("Waiting for ChargingStationServer... Retry " + retryCount + "/" + maxRetries + "...");
+                    try { Thread.sleep(2000); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
                 }
             }
 
             if (chargingStation == null) {
-
-                System.out.println(
-                        "Could not connect to "
-                        + "ChargingStationServer."
-                );
-
-                System.out.println(
-                        "Please start ChargingStationServer "
-                        + "on port 1234."
-                );
-
+                System.out.println("Could not connect to ChargingStationServer.");
                 return;
             }
 
-            // -------------------------------------------------
-            // Create RMI registry
-            // -------------------------------------------------
-
             LocateRegistry.createRegistry(1235);
+            ReservationServer server = new ReservationServer(chargingStation);
 
-            // -------------------------------------------------
-            // Create server
-            // -------------------------------------------------
+            Naming.rebind("rmi://localhost:1235/ReservationService", server);
 
-            ReservationServer server =
-                    new ReservationServer(
-                            chargingStation
-                    );
+            System.out.println("=================================");
+            System.out.println("   RESERVATION RMI SERVER");
+            System.out.println("=================================");
 
-            // -------------------------------------------------
-            // Bind server
-            // -------------------------------------------------
+            try {
+                server.synchronizeClock();
+            } catch (Exception syncEx) {
+                System.out.println("Startup clock synchronization warning: " + syncEx.getMessage());
+            }
 
-            Naming.rebind(
-                    "rmi://localhost:1235/ReservationService",
-                    server
-            );
-
-            // -------------------------------------------------
-            // Server information
-            // -------------------------------------------------
-
-            System.out.println(
-                    "================================="
-            );
-
-            System.out.println(
-                    "   RESERVATION RMI SERVER"
-            );
-
-            System.out.println(
-                    "================================="
-            );
-
-            System.out.println(
-                    "Server started successfully."
-            );
-
-            System.out.println(
-                    "Port: 1235"
-            );
-
-            System.out.println(
-                    "Service: ReservationService"
-            );
-
-            System.out.println(
-                    "Connected to ChargingStationServer "
-                    + "on port 1234"
-            );
-
-            System.out.println(
-                    "---------------------------------"
-            );
-
-            System.out.println(
-                    "Concurrent reservation processing: ENABLED"
-            );
-
-            System.out.println(
-                    "Port synchronization: "
-                    + "ChargingStationServer"
-            );
-
-            System.out.println(
-                    "Simulated processing delays: ENABLED"
-            );
-
-            System.out.println(
-                    "Waiting for reservation requests..."
-            );
-
-            System.out.println(
-                    "================================="
-            );
+            System.out.println("Waiting for reservation requests...");
+            System.out.println("=================================");
 
         } catch (Exception e) {
-
-            System.out.println(
-                    "Server Error: "
-                    + e.getMessage()
-            );
-
+            System.out.println("Server Error: " + e.getMessage());
             e.printStackTrace();
         }
     }

@@ -1,87 +1,52 @@
 # EV Charging Network Management System — Architecture Overview
 
-## Overview
-The EV Charging Network Management System is a distributed, service-oriented architecture implemented using **Java Remote Method Invocation (RMI)**. The system enables Electric Vehicle (EV) drivers to discover charging stations, reserve ports, initiate and stop charging sessions, calculate dynamic pricing, process payments, and automatically release charging ports upon successful payment completion.
+## Executive Summary
+This project implements a **Distributed EV Charging Network Management System** built with **Java RMI**, **Docker Compose**, **Lamport Logical Clocks**, **Cristian's Physical Clock Synchronization Algorithm**, and **Real-Time Physical Session Duration Energy Calculation**.
+
+The system manages physical charging ports, slot reservations, charging sessions, real-time energy calculation ($E = P \times T$), dynamic pricing calculations, and payment settlements across five decoupled microservice servers and one reference time server.
 
 ---
 
-## High-Level Component Architecture
+## Architectural Principles & Clock Dualism
 
 ```
-                         EVClient (Console App)
-                            |
-              +-------------+-------------+
-              |             |             |
-              v             v             v
-       Reservation   ChargingSession   Payment
-          Server         Server         Server
-              |             |             |
-              v             v             v
-       ChargingStation   Reservation   Pricing & ChargingStation
-          Server          Server        Servers
++-----------------------------------------------------------------------+
+|                            DISTRIBUTED SYSTEM                         |
+|                                                                       |
+|  +-------------------+        +-------------------+                   |
+|  |     TimeServer    |        |  ChargingStation  |                   |
+|  |   (Port 1239/2239)|        |  (Port 1234/2234) |                   |
+|  +---------^---------+        +---------^---------+                   |
+|            |                            |                             |
+|            | Cristian Sync              | RMI + Lamport               |
+|            |                            |                             |
+|  +---------+---------+        +---------+---------+                   |
+|  | ReservationServer |        |ChargingSessionSrv | (Instant.now())   |
+|  |   (Port 1235/2235)|        |  (Port 1236/2236) +---+ Energy =     |
+|  +---------+---------+        +---------+---------+   | Power * Time  |
+|            |                            |             +---------------+
+|            | RMI + Lamport              | RMI + Lamport (Calculated kWh)
+|            v                            v                             |
+|  +-------------------+        +-------------------+                   |
+|  |   PaymentServer   +------->|   PricingServer   |                   |
+|  |   (Port 1237/2237)|        |  (Port 1238/2238) |                   |
+|  +-------------------+        +-------------------+                   |
++-----------------------------------------------------------------------+
 ```
 
-```
-                    MultithreadTest (Concurrency Test)
-                           |
-                    10 Parallel Threads
-                           |
-                           v
-                     RMI Servers
-```
+### 1. Dual Clock Abstraction
+- **Physical Clock (`java.time.Instant.now()`)**: Measures actual elapsed physical charging duration ($T_{\text{end}} - T_{\text{start}}$) hooked by `libfaketime` inside Docker containers. Physical time is used EXCLUSIVELY for energy calculation ($E = P \times T$).
+- **Lamport Logical Clock (`LogicalClock.java`)**: Manages logical event ordering across independent distributed servers and clients using lock-free `AtomicLong` CAS state updates (`tick`, `sendEvent`, `receiveEvent`). Lamport time is used EXCLUSIVELY for event ordering, never for duration calculations.
 
 ---
 
-## Key System Components
+## Energy & Pricing Formulas
 
-### 1. Primary Application Client (`EVClient.java`)
-- Single interactive console application for human users.
-- Connects dynamically to all 5 RMI servers on demand.
-- Exercises the full lifecycle (station status, port lookup, slot reservation, session management, billing calculation, payment, and status checking).
-- Never exports remote objects itself.
+1. **Charging Duration**:
+   $$\text{Duration (seconds)} = \text{Duration.between}(T_{\text{start}}, T_{\text{end}}).\text{toMillis}() / 1000.0$$
 
-### 2. Concurrency Test Client (`MultithreadTest.java`)
-- Automated multi-threaded load test simulating 10 concurrent EV client requests.
-- Uses Java `ExecutorService` and `CountDownLatch` (start signal & completion signal) to unleash 10 concurrent threads simultaneously.
-- Demonstrates safe shared-state management, double-booking prevention, and graceful handling when all 4 station ports are occupied.
+2. **Energy Consumed**:
+   $$\text{Energy (kWh)} = \text{Charging Power (7.2 kW)} \times \frac{\text{Duration (seconds)}}{3600.0}$$
 
-### 3. ChargingStationServer (RMI Port 1234)
-- **Service Name**: `ChargingStationServer`
-- Manages physical charging ports (`P1`, `P2`, `P3`, `P4`) and their operational states (`AVAILABLE`, `RESERVED`, `CHARGING`).
-- Provides atomic port check-and-reserve (`reserveAnyAvailablePort`) and state transition operations (`startPortCharging`, `releasePort`).
-
-### 4. ReservationServer (RMI Port 1235)
-- **Service Name**: `ReservationService`
-- Handles slot booking requests from clients.
-- Coordinates with `ChargingStationServer` to allocate available ports.
-- Manages reservation records (`RES1001`, `RES1002`, etc.) and port mappings.
-
-### 5. ChargingSessionServer (RMI Port 1236)
-- **Service Name**: `ChargingSessionServer`
-- Validates reservation status with `ReservationServer`.
-- Signals `ChargingStationServer` to transition port state from `RESERVED` to `CHARGING`.
-- Tracks session lifecycle (`CHARGING` → `COMPLETED`) and energy consumption (`25.0 kWh`).
-- **Does NOT release the port on stop charging**; keeps session data available for payment processing.
-
-### 6. PricingServer (RMI Port 1238)
-- **Service Name**: `PricingService`
-- Computes dynamic billing rates based on station demand multipliers (`LOW` = 1.0x, `MEDIUM` = 1.25x, `HIGH` = 1.50x) and energy consumed (`BASE_PRICE` = Rs. 10.0/kWh).
-
-### 7. PaymentServer (RMI Port 1237)
-- **Service Name**: `PaymentServer`
-- Validates completed sessions with `ChargingSessionServer`.
-- Retrieves energy consumed from `ChargingSessionServer` and price calculation from `PricingServer`.
-- Generates payment receipts (`PAY-1001`) with status `SUCCESS`.
-- **Triggers Post-Payment Port Release**: Invokes `ChargingStationServer.releasePort(portId)` only after payment succeeds, transitioning the port from `CHARGING` to `AVAILABLE`.
-
----
-
-## Server Dependencies & Registry Ports
-
-| Server | Registry Port | Bound Service Name | External Server Dependencies |
-|--------|---------------|-------------------|------------------------------|
-| `ChargingStationServer` | 1234 | `ChargingStationServer` | None |
-| `ReservationServer` | 1235 | `ReservationService` | `ChargingStationServer` (Port 1234) |
-| `ChargingSessionServer` | 1236 | `ChargingSessionServer` | `ChargingStationServer` (1234), `ReservationServer` (1235) |
-| `PricingServer` | 1238 | `PricingService` | None |
-| `PaymentServer` | 1237 | `PaymentServer` | `ChargingSessionServer` (1236), `PricingServer` (1238), `ChargingStationServer` (1234) |
+3. **Total Bill**:
+   $$\text{Bill (Rs.)} = \text{Base Price (Rs. 10.0/kWh)} \times \text{Energy (kWh)} \times \text{Demand Multiplier}$$

@@ -1,50 +1,60 @@
-# EV Charging Network Management System — Project Structure
-
-## Final Project Layout
+# Project Structure Reference
 
 ```
-c:/Users/asus/Desktop/College/Sem 5/DC/Java/
+Java/
+│   .gitignore
+│   all_java_codes.txt
+│   docker-compose.yml
+│   Dockerfile
+│   EVClient.java
+│   get_codes.py
+│   MultithreadTest.java
+│   README.md
 │
-├── EVClient.java                         # Primary interactive console application client
-├── MultithreadTest.java                  # Multi-threaded concurrency & stress test client
+├── bin/
 │
-├── ChargingStation/                      # Station & Port Management Subsystem
-│   ├── ChargingStationInterface.java     # Remote interface for station operations
-│   └── ChargingStationServer.java        # RMI Server (Port 1234)
+├── Clock/
+│   ├── CristianClient.java
+│   ├── DistributedLogger.java
+│   ├── LogicalClock.java
+│   ├── PhysicalClock.java
+│   ├── TimeServer.java
+│   └── TimeServerInterface.java
 │
-├── Reservation/                          # Slot Booking Subsystem
-│   ├── ReservationInterface.java         # Remote interface for reservations
-│   └── ReservationServer.java            # RMI Server (Port 1235)
+├── ChargingSession/
+│   ├── ChargingSessionInterface.java
+│   └── ChargingSessionServer.java
 │
-├── ChargingSession/                      # Session Tracking Subsystem
-│   ├── ChargingSessionInterface.java     # Remote interface for charging sessions
-│   └── ChargingSessionServer.java        # RMI Server (Port 1236)
+├── ChargingStation/
+│   ├── ChargingStationInterface.java
+│   └── ChargingStationServer.java
 │
-├── Pricing/                              # Dynamic Pricing Subsystem
-│   ├── PricingInterface.java             # Remote interface for pricing calculations
-│   └── PricingServer.java                # RMI Server (Port 1238)
+├── Payment/
+│   ├── PaymentInterface.java
+│   └── PaymentServer.java
 │
-├── Payment/                              # Payment Processing & Port Release Subsystem
-│   ├── PaymentInterface.java             # Remote interface for payment processing
-│   └── PaymentServer.java                # RMI Server (Port 1237)
+├── Pricing/
+│   ├── PricingInterface.java
+│   └── PricingServer.java
 │
-├── bin/                                  # Compiled bytecode output directory (.class files)
+├── Reservation/
+│   ├── ReservationInterface.java
+│   └── ReservationServer.java
 │
-└── docs/                                 # Documentation Directory
-    ├── AUDIT.md                          # Full code audit report & problem statements
-    ├── ARCHITECTURE.md                   # System architecture overview & dependencies
-    ├── WORKFLOW.md                       # Complete end-to-end business workflow
-    ├── RMI_COMMUNICATION.md              # RMI interfaces & remote communication details
-    ├── MULTITHREADING.md                 # Threading model & double-booking protection
-    ├── STATE_MANAGEMENT.md               # State machine specifications & transitions
-    ├── TESTING.md                        # Compilation & execution instructions
-    └── PROJECT_STRUCTURE.md              # This file
+├── docs/
+│   ├── ARCHITECTURE.md
+│   ├── AUDIT.md
+│   ├── DOCKER.md
+│   ├── MODULES.md
+│   ├── MULTITHREADING.md
+│   ├── PROJECT_STRUCTURE.md
+│   ├── RMI_COMMUNICATION.md
+│   ├── STATE_MANAGEMENT.md
+│   ├── TESTING.md
+│   └── WORKFLOW.md
+│
+└── log/
+    ├── clock_implementation.log
+    ├── docker_implementation.log
+    └── encoding_fix.log
 ```
-
----
-
-## Architectural Rules & Verification
-- **Primary Client**: `EVClient.java` is the ONLY interactive application client.
-- **Concurrency Test**: `MultithreadTest.java` is the single load test.
-- **No Dummy Clients**: Dummy per-module clients (`ChargingStationClient`, `ReservationClient`, `ChargingSessionClient`, `PricingClient`, `PaymentClient`) have been removed and are NOT recreated.
-- **Backend Architecture**: Consists of 5 independent RMI servers communicating over designated RMI registry ports (1234–1238).

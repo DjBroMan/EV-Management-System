@@ -1,96 +1,45 @@
-# EV Charging Network Management System — End-to-End Business Workflow
+# EV Charging Network Management System — Workflow & Clock Lifecycle
 
-## Complete Charging & Payment Lifecycle
+## Complete Business Workflow & Event Timeline
+
+The business workflow consists of 6 sequential steps, with Lamport logical timestamps propagating across every stage and physical time tracking charging duration:
 
 ```
-EVClient
-   │
-   │ 1. reserveSlot(userId, vehicleId)
-   ▼
-ReservationServer
-   │
-   │ 2. reserveAnyAvailablePort()
-   ▼
-ChargingStationServer ────────► Port State: AVAILABLE → RESERVED
-   │
-   │ 3. Reservation ID generated (RES1001)
-   ▼
-EVClient
-   │
-   │ 4. startCharging(reservationId)
-   ▼
-ChargingSessionServer
-   │
-   ├─► 5. getReservation(reservationId) ──► ReservationServer (Validate)
-   ├─► 6. getReservationPort(reservationId) ─► ReservationServer (Fetch Port)
-   │
-   │ 7. startPortCharging(portId)
-   ▼
-ChargingStationServer ────────► Port State: RESERVED → CHARGING
-   │
-   │ 8. Session ID generated (SESSION-1001)
-   ▼
-EVClient (EV Charging...)
-   │
-   │ 9. stopCharging(sessionId)
-   ▼
-ChargingSessionServer ────────► Session State: CHARGING → COMPLETED
-   │                            Energy Consumed Recorded: 25.0 kWh
-   │                            (Port remains CHARGING / locked)
-   ▼
-EVClient
-   │
-   │ 10. makePayment(sessionId)
-   ▼
-PaymentServer
-   │
-   ├─► 11. getSessionStatus(sessionId) ──► ChargingSessionServer (Verify COMPLETED)
-   ├─► 12. getEnergyConsumed(sessionId) ─► ChargingSessionServer (Fetch kWh)
-   ├─► 13. calculatePrice(stationId, energy) ─► PricingServer (Calculate Bill)
-   │
-   │ 14. Payment ID generated (PAY-1001, Status: SUCCESS)
-   │ 15. getSessionPort(sessionId) ──────► ChargingSessionServer (Fetch Port)
-   │ 16. releasePort(portId)
-   ▼
-ChargingStationServer ────────► Port State: CHARGING → AVAILABLE
-   │
-   ▼
-EVClient (Transaction Completed)
+[1. RESERVE SLOT] ---> [2. START CHARGING] ---> [3. STOP CHARGING] ---> [4. GET ENERGY & PRICING] ---> [5. MAKE PAYMENT] ---> [6. PORT RELEASE]
 ```
 
----
+### Step-by-Step Event Lifecycle & Energy Calculation
 
-## Detailed Step-by-Step Execution Sequence
+1. **Reserve Slot**:
+   - Client sends `reserveSlot(userId, vehicleId, clientLamport)` with Lamport $L_{\text{client\_send1}}$.
+   - `ReservationServer` receives call, updates $L = \max(L_{\text{server}}, L_{\text{client\_send1}}) + 1$, logs `[Event=RECEIVE]`.
+   - `ReservationServer` calls `ChargingStationServer.reserveAnyAvailablePort(sendL)`.
+   - `ChargingStationServer` allocates port `P1` $\rightarrow$ `RESERVED`, logs `[Event=LOCAL]`, returns `LamportResult("P1", stationL)`.
+   - `ReservationServer` receives response, stores reservation `RES1001`, returns `LamportResult(details, resL)` to client.
 
-### Phase 1: Slot Reservation
-1. `EVClient` calls `ReservationServer.reserveSlot("USER-1", "EV-1")`.
-2. `ReservationServer` contacts `ChargingStationServer.reserveAnyAvailablePort()`.
-3. `ChargingStationServer` scans ports (`P1`–`P4`), finds the first `AVAILABLE` port (e.g., `P1`), updates its status to `RESERVED`, and returns `P1`.
-4. `ReservationServer` generates a unique reservation ID (`RES1001`), creates a confirmation record, maps `RES1001 → P1`, and returns details to `EVClient`.
+2. **Start Charging**:
+   - Client sends `startCharging(reservationId, clientLamport)`.
+   - `ChargingSessionServer` verifies reservation and port status.
+   - `ChargingStationServer` transitions port `P1` $\rightarrow$ `CHARGING`.
+   - `ChargingSessionServer` records physical start time $T_{\text{start}} = \text{Instant.now()}$, sets default charging power ($7.2\text{ kW}$), creates `SESSION-1001`, and returns `LamportResult(details, sessL)`.
 
-### Phase 2: Charging Session Initiation
-5. `EVClient` calls `ChargingSessionServer.startCharging("RES1001")`.
-6. `ChargingSessionServer` queries `ReservationServer.getReservation("RES1001")` to verify the reservation is valid and active.
-7. `ChargingSessionServer` queries `ReservationServer.getReservationPort("RES1001")` to retrieve the assigned port (`P1`).
-8. `ChargingSessionServer` calls `ChargingStationServer.startPortCharging("P1")`.
-9. `ChargingStationServer` updates port `P1` status from `RESERVED` to `CHARGING`.
-10. `ChargingSessionServer` creates a session record (`SESSION-1001`), sets status to `CHARGING`, initializes energy to `0.0 kWh`, and returns success to `EVClient`.
+3. **Stop Charging & Real-Time Energy Calculation**:
+   - Client sends `stopCharging(sessionId, clientLamport)`.
+   - `ChargingSessionServer` records physical end time $T_{\text{end}} = \text{Instant.now()}$.
+   - **Duration Calculation**:
+     $$\text{Duration (seconds)} = T_{\text{end}} - T_{\text{start}}$$
+     $$\text{Duration (hours)} = \frac{\text{Duration (seconds)}}{3600.0}$$
+   - **Energy Consumption Formula**:
+     $$\text{Energy (kWh)} = \text{Charging Power (kW)} \times \text{Duration (hours)}$$
+   - `ChargingSessionServer` updates session status $\rightarrow$ `COMPLETED`, logs `[Event=LOCAL]` energy calculation, and returns session breakdown (Start Time, End Time, Duration, Charging Power, Energy Consumed). Port `P1` remains locked in `CHARGING` state.
 
-### Phase 3: Charging Session Termination
-11. `EVClient` calls `ChargingSessionServer.stopCharging("SESSION-1001")`.
-12. `ChargingSessionServer` calculates total energy consumed (`25.0 kWh`).
-13. `ChargingSessionServer` updates session status from `CHARGING` to `COMPLETED`.
-14. **Crucial Rule**: The port (`P1`) **remains in CHARGING state** (locked) and is **NOT released** during `stopCharging()`.
+4. **Pricing Computation**:
+   - `PaymentServer` queries `ChargingSessionServer.getEnergyConsumed(sessionId)`.
+   - `PaymentServer` invokes `PricingServer.calculatePrice("S01", energyConsumed, sendL)`.
+   - `PricingServer` computes total bill using:
+     $$\text{Bill} = \text{Base Price (Rs. 10.0)} \times \text{Energy (kWh)} \times \text{Demand Multiplier}$$
 
-### Phase 4: Pricing & Payment
-15. `EVClient` calls `PaymentServer.makePayment("SESSION-1001")`.
-16. `PaymentServer` checks `ChargingSessionServer.getSessionStatus("SESSION-1001")` to ensure charging is `COMPLETED`.
-17. `PaymentServer` calls `ChargingSessionServer.getEnergyConsumed("SESSION-1001")` to retrieve `25.0 kWh`.
-18. `PaymentServer` calls `PricingServer.calculatePrice("S01", 25.0)` to compute the bill (`Rs. 250.00`).
-19. `PaymentServer` generates a payment receipt (`PAY-1001`) with status `SUCCESS`.
-
-### Phase 5: Post-Payment Port Release
-20. **Upon successful payment**, `PaymentServer` calls `ChargingSessionServer.getSessionPort("SESSION-1001")` to retrieve port `P1`.
-21. `PaymentServer` calls `ChargingStationServer.releasePort("P1")`.
-22. `ChargingStationServer` updates port `P1` status from `CHARGING` to `AVAILABLE`.
-23. Port `P1` is now ready for future reservations.
+5. **Payment Settlement & Post-Payment Port Release**:
+   - `PaymentServer` verifies bill, creates payment receipt `PAY-1001` with status `SUCCESS`.
+   - `PaymentServer` invokes `ChargingStationServer.releasePort("P1", sendL)`.
+   - `ChargingStationServer` transitions port `P1` $\rightarrow$ `AVAILABLE`.

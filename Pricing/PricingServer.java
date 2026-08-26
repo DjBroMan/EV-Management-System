@@ -4,62 +4,67 @@ import java.rmi.registry.LocateRegistry;
 import java.rmi.server.UnicastRemoteObject;
 import java.util.HashMap;
 import java.util.Map;
+import Clock.LogicalClock;
+import Clock.PhysicalClock;
+import Clock.CristianClient;
+import Clock.DistributedLogger;
+import Clock.LamportResult;
 
 // RMI Server implementation for dynamic EV charging price computation
 public class PricingServer extends UnicastRemoteObject
         implements PricingInterface {
 
     private static final long serialVersionUID = 1L;
+    private static final String SERVER_NAME = "PricingServer";
+    private final LogicalClock logicalClock = new LogicalClock();
 
-    // Standard rate per kWh
     private static final double BASE_PRICE = 10.0;
-
-    // Stores station ID -> demand level
     private Map<String, String> stationDemand;
 
-    // Constructor
     protected PricingServer() throws RemoteException {
         super(2238);
 
         stationDemand = new HashMap<>();
-
-        // Sample station demand levels
         stationDemand.put("S01", "LOW");
         stationDemand.put("S02", "MEDIUM");
         stationDemand.put("S03", "HIGH");
     }
 
-    // =========================================================
-    // THREAD LOGGING
-    // =========================================================
-
     private void log(String message) {
-
-        System.out.println(
-                "[Thread-" +
-                Thread.currentThread().getId() +
-                " | " +
-                Thread.currentThread().getName() +
-                "] " +
-                message
-        );
+        DistributedLogger.log(SERVER_NAME, logicalClock, message);
     }
 
-    // =========================================================
-    // SIMULATED PROCESSING DELAY
-    // =========================================================
+    private void log(String eventType, String message) {
+        DistributedLogger.log(SERVER_NAME, logicalClock, eventType, message);
+    }
 
     private void simulateProcessing(long milliseconds) {
-
         try {
-
             Thread.sleep(milliseconds);
-
         } catch (InterruptedException e) {
-
             Thread.currentThread().interrupt();
-
             log("Thread interrupted during processing.");
+        }
+    }
+
+    @Override
+    public String synchronizeClock() throws RemoteException {
+        logicalClock.tick();
+        log("LOCAL", "Initiating Cristian Physical Clock Synchronization...");
+        String timeServerHost = System.getenv("TIME_SERVER_HOST");
+        if (timeServerHost == null || timeServerHost.trim().isEmpty()) {
+            timeServerHost = "localhost";
+        }
+        String timeServerUrl = "rmi://" + timeServerHost + ":1239/TimeServer";
+        CristianClient.SyncResult res = CristianClient.synchronize(SERVER_NAME, timeServerUrl);
+        logicalClock.tick();
+        if (res.success) {
+            log("LOCAL",
+                    "Clock synchronization completed successfully. Calculated offset: " + res.clockOffsetMs + " ms");
+            return "Clock synchronized successfully. Offset: " + res.clockOffsetMs + " ms";
+        } else {
+            log("LOCAL", "Clock synchronization failed: " + res.errorMessage);
+            return "Clock synchronization failed: " + res.errorMessage;
         }
     }
 
@@ -68,123 +73,64 @@ public class PricingServer extends UnicastRemoteObject
     // =========================================================
 
     @Override
-    public double calculatePrice(
+    public double calculatePrice(String stationId, double energyConsumed) throws RemoteException {
+        return calculatePrice(stationId, energyConsumed, 0).getData();
+    }
+
+    @Override
+    public LamportResult<Double> calculatePrice(
             String stationId,
-            double energyConsumed)
+            double energyConsumed,
+            long clientLamport)
             throws RemoteException {
 
-        log("CALCULATE PRICE request received.");
-        log("Station: " + stationId);
-        log("Energy requested: "
-                + energyConsumed + " kWh");
-
-        // -----------------------------------------------------
-        // Validate energy
-        // -----------------------------------------------------
-
-        log("Validating energy consumption...");
+        long recvL = logicalClock.receiveEvent(clientLamport);
+        log("RECEIVE", "CALCULATE PRICE request received for Station " + stationId + ", Energy " + energyConsumed
+                + " kWh (Client Lamport: " + clientLamport + "). Clock updated to " + recvL);
 
         simulateProcessing(300);
 
         if (energyConsumed < 0) {
-
-            log("Invalid energy value.");
-
-            return -1;
+            log("LOCAL", "Invalid energy value.");
+            long respL = logicalClock.sendEvent();
+            return new LamportResult<>(-1.0, respL);
         }
-
-        // -----------------------------------------------------
-        // Get demand level
-        // -----------------------------------------------------
-
-        log("Checking demand level for station "
-                + stationId);
 
         simulateProcessing(500);
 
-        String demand =
-                stationDemand.get(stationId);
-
+        String demand = stationDemand.get(stationId);
         if (demand == null) {
-
-            log("Station not found. "
-                    + "Defaulting demand to LOW.");
-
             demand = "LOW";
         }
-
-        log("Demand level: " + demand);
-
-        // -----------------------------------------------------
-        // Determine multiplier
-        // -----------------------------------------------------
-
-        log("Determining demand multiplier...");
 
         simulateProcessing(400);
 
         double multiplier;
-
         switch (demand) {
-
             case "LOW":
-
                 multiplier = 1.0;
-
                 break;
-
             case "MEDIUM":
-
                 multiplier = 1.25;
-
                 break;
-
             case "HIGH":
-
                 multiplier = 1.50;
-
                 break;
-
             default:
-
                 multiplier = 1.0;
         }
 
-        log("Base price: Rs. "
-                + BASE_PRICE + "/kWh");
-
-        log("Demand multiplier: "
-                + multiplier);
-
-        // -----------------------------------------------------
-        // Calculate final price
-        // -----------------------------------------------------
-
-        log("Calculating final price...");
-
         simulateProcessing(500);
+        double finalPrice = BASE_PRICE * energyConsumed * multiplier;
 
-        double finalPrice =
-                BASE_PRICE
-                * energyConsumed
-                * multiplier;
-
-        log("Price calculation:");
-
-        log(
-            BASE_PRICE
-            + " * "
-            + energyConsumed
-            + " * "
-            + multiplier
-        );
-
-        log("Final price: Rs. "
+        logicalClock.tick();
+        log("LOCAL", "Price calculated: " + BASE_PRICE + " * " + energyConsumed + " * " + multiplier + " = Rs. "
                 + finalPrice);
 
-        log("CALCULATE PRICE task completed.");
+        long sendL = logicalClock.sendEvent();
+        log("SEND", "Returning CALCULATE PRICE response Rs. " + finalPrice + " (Lamport: " + sendL + ")");
 
-        return finalPrice;
+        return new LamportResult<>(finalPrice, sendL);
     }
 
     // =========================================================
@@ -192,75 +138,51 @@ public class PricingServer extends UnicastRemoteObject
     // =========================================================
 
     @Override
-    public double getDemandMultiplier(
-            String stationId)
+    public double getDemandMultiplier(String stationId) throws RemoteException {
+        return getDemandMultiplier(stationId, 0).getData();
+    }
+
+    @Override
+    public LamportResult<Double> getDemandMultiplier(
+            String stationId,
+            long clientLamport)
             throws RemoteException {
 
-        log("GET DEMAND MULTIPLIER request received.");
-        log("Station: " + stationId);
-
-        // -----------------------------------------------------
-        // Look up demand
-        // -----------------------------------------------------
-
-        log("Looking up station demand...");
+        long recvL = logicalClock.receiveEvent(clientLamport);
+        log("RECEIVE", "GET DEMAND MULTIPLIER request received for Station " + stationId + " (Client Lamport: "
+                + clientLamport + "). Clock updated to " + recvL);
 
         simulateProcessing(400);
 
-        String demand =
-                stationDemand.get(stationId);
-
+        String demand = stationDemand.get(stationId);
         if (demand == null) {
-
-            log("Station not found. "
-                    + "Defaulting demand to LOW.");
-
             demand = "LOW";
         }
-
-        log("Demand level: " + demand);
-
-        // -----------------------------------------------------
-        // Determine multiplier
-        // -----------------------------------------------------
-
-        log("Calculating demand multiplier...");
 
         simulateProcessing(400);
 
         double multiplier;
-
         switch (demand) {
-
             case "LOW":
-
                 multiplier = 1.0;
-
                 break;
-
             case "MEDIUM":
-
                 multiplier = 1.25;
-
                 break;
-
             case "HIGH":
-
                 multiplier = 1.50;
-
                 break;
-
             default:
-
                 multiplier = 1.0;
         }
 
-        log("Returning multiplier: "
-                + multiplier);
+        logicalClock.tick();
+        log("LOCAL", "Demand multiplier: " + multiplier);
 
-        log("GET DEMAND MULTIPLIER task completed.");
+        long sendL = logicalClock.sendEvent();
+        log("SEND", "Returning GET DEMAND MULTIPLIER response " + multiplier + " (Lamport: " + sendL + ")");
 
-        return multiplier;
+        return new LamportResult<>(multiplier, sendL);
     }
 
     // =========================================================
@@ -268,99 +190,35 @@ public class PricingServer extends UnicastRemoteObject
     // =========================================================
 
     public static void main(String[] args) {
-
         try {
-
             String rmiHost = System.getenv("RMI_SERVER_HOST");
             if (rmiHost != null && !rmiHost.trim().isEmpty()) {
                 System.setProperty("java.rmi.server.hostname", rmiHost);
             }
 
-            System.out.println(
-                    "Starting Pricing Server..."
-            );
+            System.out.println("Starting Pricing Server...");
 
-            // Start RMI registry on port 1238
             LocateRegistry.createRegistry(1238);
 
-            // Create PricingServer instance
-            PricingServer server =
-                    new PricingServer();
+            PricingServer server = new PricingServer();
 
-            // Bind service
-            Naming.rebind(
-                    "rmi://localhost:1238/PricingService",
-                    server
-            );
+            Naming.rebind("rmi://localhost:1238/PricingService", server);
 
-            System.out.println(
-                    "================================="
-            );
+            System.out.println("=================================");
+            System.out.println("       PRICING RMI SERVER");
+            System.out.println("=================================");
 
-            System.out.println(
-                    "       PRICING RMI SERVER"
-            );
+            try {
+                server.synchronizeClock();
+            } catch (Exception syncEx) {
+                System.out.println("Startup clock synchronization warning: " + syncEx.getMessage());
+            }
 
-            System.out.println(
-                    "================================="
-            );
+            System.out.println("Waiting for pricing requests...");
+            System.out.println("=================================");
 
-            System.out.println(
-                    "Server started successfully."
-            );
-
-            System.out.println(
-                    "Port: 1238"
-            );
-
-            System.out.println(
-                    "Service: PricingService"
-            );
-
-            System.out.println(
-                    "---------------------------------"
-            );
-
-            System.out.println(
-                    "Stations:"
-            );
-
-            System.out.println(
-                    "S01 -> LOW demand"
-            );
-
-            System.out.println(
-                    "S02 -> MEDIUM demand"
-            );
-
-            System.out.println(
-                    "S03 -> HIGH demand"
-            );
-
-            System.out.println(
-                    "---------------------------------"
-            );
-
-            System.out.println(
-                    "Simulated processing delays: ENABLED"
-            );
-
-            System.out.println(
-                    "Waiting for pricing requests..."
-            );
-
-            System.out.println(
-                    "================================="
-            );
-
-        }
-        catch (Exception e) {
-
-            System.out.println(
-                    "Server Error: "
-                    + e.getMessage()
-            );
-
+        } catch (Exception e) {
+            System.out.println("Server Error: " + e.getMessage());
             e.printStackTrace();
         }
     }

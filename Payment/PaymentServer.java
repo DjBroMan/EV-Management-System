@@ -2,11 +2,19 @@ import java.rmi.*;
 import java.rmi.server.*;
 import java.rmi.registry.*;
 import java.util.HashMap;
+import Clock.LogicalClock;
+import Clock.PhysicalClock;
+import Clock.CristianClient;
+import Clock.DistributedLogger;
+import Clock.LamportResult;
 
 // RMI Server class that implements PaymentInterface
 public class PaymentServer
         extends UnicastRemoteObject
         implements PaymentInterface {
+
+    private static final String SERVER_NAME = "PaymentServer";
+    private final LogicalClock logicalClock = new LogicalClock();
 
     // Stores payment ID -> payment status
     private HashMap<String, String> paymentStatus;
@@ -34,23 +42,14 @@ public class PaymentServer
 
         super(2237);
 
-        paymentStatus =
-                new HashMap<String, String>();
+        paymentStatus = new HashMap<String, String>();
+        paymentDetails = new HashMap<String, String>();
 
-        paymentDetails =
-                new HashMap<String, String>();
-
-        this.chargingSession =
-                chargingSession;
-
-        this.pricing =
-                pricing;
-
-        this.chargingStation =
-                chargingStation;
+        this.chargingSession = chargingSession;
+        this.pricing = pricing;
+        this.chargingStation = chargingStation;
     }
 
-    // Overloaded constructor for backwards compatibility
     public PaymentServer(
             ChargingSessionInterface chargingSession,
             PricingInterface pricing)
@@ -59,37 +58,40 @@ public class PaymentServer
         this(chargingSession, pricing, null);
     }
 
-    // =========================================================
-    // THREAD LOGGING
-    // =========================================================
-
-    private void log(String message)
-    {
-        System.out.println(
-                "[Thread-" +
-                Thread.currentThread().getId() +
-                " | " +
-                Thread.currentThread().getName() +
-                "] " +
-                message
-        );
+    private void log(String message) {
+        DistributedLogger.log(SERVER_NAME, logicalClock, message);
     }
 
-    // =========================================================
-    // SIMULATED PROCESSING DELAY
-    // =========================================================
+    private void log(String eventType, String message) {
+        DistributedLogger.log(SERVER_NAME, logicalClock, eventType, message);
+    }
 
-    private void simulateProcessing(long milliseconds)
-    {
-        try
-        {
+    private void simulateProcessing(long milliseconds) {
+        try {
             Thread.sleep(milliseconds);
-        }
-        catch (InterruptedException e)
-        {
+        } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-
             log("Thread interrupted during processing.");
+        }
+    }
+
+    @Override
+    public String synchronizeClock() throws RemoteException {
+        logicalClock.tick();
+        log("LOCAL", "Initiating Cristian Physical Clock Synchronization...");
+        String timeServerHost = System.getenv("TIME_SERVER_HOST");
+        if (timeServerHost == null || timeServerHost.trim().isEmpty()) {
+            timeServerHost = "localhost";
+        }
+        String timeServerUrl = "rmi://" + timeServerHost + ":1239/TimeServer";
+        CristianClient.SyncResult res = CristianClient.synchronize(SERVER_NAME, timeServerUrl);
+        logicalClock.tick();
+        if (res.success) {
+            log("LOCAL", "Clock synchronization completed successfully. Calculated offset: " + res.clockOffsetMs + " ms");
+            return "Clock synchronized successfully. Offset: " + res.clockOffsetMs + " ms";
+        } else {
+            log("LOCAL", "Clock synchronization failed: " + res.errorMessage);
+            return "Clock synchronization failed: " + res.errorMessage;
         }
     }
 
@@ -97,230 +99,131 @@ public class PaymentServer
     // MAKE PAYMENT
     // =========================================================
 
-    public String makePayment(
-            String sessionId)
+    @Override
+    public String makePayment(String sessionId) throws RemoteException {
+        return makePayment(sessionId, 0).getData();
+    }
+
+    @Override
+    public LamportResult<String> makePayment(
+            String sessionId,
+            long clientLamport)
             throws RemoteException {
 
-        log("MAKE PAYMENT request received for Session: "
-                + sessionId);
-
-        // -----------------------------------------------------
-        // Validate session ID
-        // -----------------------------------------------------
-
-        log("Validating Session ID...");
+        long recvL = logicalClock.receiveEvent(clientLamport);
+        log("RECEIVE", "MAKE PAYMENT request received for Session " + sessionId + " (Client Lamport: " + clientLamport + "). Clock updated to " + recvL);
 
         simulateProcessing(500);
 
-        if (sessionId == null ||
-                sessionId.length() == 0) {
-
-            log("Payment failed: Invalid Session ID.");
-
-            return "Invalid Session ID.";
+        if (sessionId == null || sessionId.length() == 0) {
+            log("LOCAL", "Payment failed: Invalid Session ID.");
+            long respL = logicalClock.sendEvent();
+            return new LamportResult<>("Invalid Session ID.", respL);
         }
 
-        // -----------------------------------------------------
         // STEP 1: Get session status
-        // -----------------------------------------------------
+        long sendL1 = logicalClock.sendEvent();
+        log("SEND", "Contacting ChargingSessionServer.getSessionStatus for Session " + sessionId + " (Lamport: " + sendL1 + ")");
 
-        log("Contacting ChargingSessionServer "
-                + "to verify session.");
-
-        simulateProcessing(500);
-
-        String sessionInfo;
-
+        LamportResult<String> sessInfoRes;
         try {
-
-            sessionInfo =
-                    chargingSession.getSessionStatus(
-                            sessionId
-                    );
-
-            log("ChargingSessionServer response received.");
-
-        }
-        catch (RemoteException e) {
-
-            log("ChargingSessionServer is unavailable.");
-
-            return "Payment failed: "
-                    + "ChargingSessionServer is unavailable ("
-                    + e.getMessage()
-                    + ").";
+            sessInfoRes = chargingSession.getSessionStatus(sessionId, sendL1);
+            logicalClock.receiveEvent(sessInfoRes.getTimestamp());
+            log("RECEIVE", "ChargingSessionServer getSessionStatus response received (Session Lamport: " + sessInfoRes.getTimestamp() + ")");
+        } catch (RemoteException e) {
+            log("LOCAL", "ChargingSessionServer is unavailable.");
+            long respL = logicalClock.sendEvent();
+            return new LamportResult<>("Payment failed: ChargingSessionServer is unavailable (" + e.getMessage() + ").", respL);
         }
 
-        // -----------------------------------------------------
-        // Validate session
-        // -----------------------------------------------------
-
-        log("Checking session status...");
-
-        simulateProcessing(400);
-
-        if (sessionInfo == null ||
-                sessionInfo.contains("Session not found")) {
-
-            log("Session not found: "
-                    + sessionId);
-
-            return "Payment failed: Session "
-                    + sessionId
-                    + " not found.";
+        String sessionInfo = sessInfoRes.getData();
+        if (sessionInfo == null || sessionInfo.contains("Session not found")) {
+            log("LOCAL", "Session not found: " + sessionId);
+            long respL = logicalClock.sendEvent();
+            return new LamportResult<>("Payment failed: Session " + sessionId + " not found.", respL);
         }
 
         if (!sessionInfo.contains("COMPLETED")) {
-
-            log("Session has not completed charging.");
-
-            return "Payment failed: Session "
-                    + sessionId
-                    + " has not finished charging yet.";
+            log("LOCAL", "Session has not completed charging.");
+            long respL = logicalClock.sendEvent();
+            return new LamportResult<>("Payment failed: Session " + sessionId + " has not finished charging yet.", respL);
         }
 
-        log("Session verified and charging is COMPLETED.");
-
-        // -----------------------------------------------------
         // STEP 2: Get energy consumed
-        // -----------------------------------------------------
+        long sendL2 = logicalClock.sendEvent();
+        log("SEND", "Contacting ChargingSessionServer.getEnergyConsumed for Session " + sessionId + " (Lamport: " + sendL2 + ")");
 
-        log("Requesting energy consumption "
-                + "from ChargingSessionServer.");
-
-        simulateProcessing(500);
-
-        double energy;
-
+        LamportResult<Double> energyRes;
         try {
-
-            energy =
-                    chargingSession.getEnergyConsumed(
-                            sessionId
-                    );
-
-            log("Energy received: "
-                    + energy + " kWh");
-
-        }
-        catch (RemoteException e) {
-
-            log("Could not retrieve energy consumed.");
-
-            return "Payment failed: "
-                    + "could not retrieve energy consumed ("
-                    + e.getMessage()
-                    + ").";
+            energyRes = chargingSession.getEnergyConsumed(sessionId, sendL2);
+            logicalClock.receiveEvent(energyRes.getTimestamp());
+            log("RECEIVE", "ChargingSessionServer getEnergyConsumed response: " + energyRes.getData() + " kWh (Session Lamport: " + energyRes.getTimestamp() + ")");
+        } catch (RemoteException e) {
+            log("LOCAL", "Could not retrieve energy consumed.");
+            long respL = logicalClock.sendEvent();
+            return new LamportResult<>("Payment failed: could not retrieve energy consumed (" + e.getMessage() + ").", respL);
         }
 
+        double energy = energyRes.getData();
         if (energy < 0) {
-
-            log("Invalid energy value received.");
-
-            return "Payment failed: "
-                    + "no energy data found for session "
-                    + sessionId
-                    + ".";
+            log("LOCAL", "Invalid energy value received.");
+            long respL = logicalClock.sendEvent();
+            return new LamportResult<>("Payment failed: no energy data found for session " + sessionId + ".", respL);
         }
 
-        // -----------------------------------------------------
         // STEP 3: Contact PricingServer
-        // -----------------------------------------------------
+        long sendL3 = logicalClock.sendEvent();
+        log("SEND", "Contacting PricingServer.calculatePrice for Station " + STATION_ID + ", Energy " + energy + " kWh (Lamport: " + sendL3 + ")");
 
-        log("Contacting PricingServer "
-                + "to calculate final price.");
-
-        simulateProcessing(500);
-
-        double amount;
-
+        LamportResult<Double> priceRes;
         try {
-
-            amount =
-                    pricing.calculatePrice(
-                            STATION_ID,
-                            energy
-                    );
-
-            log("PricingServer returned amount: "
-                    + "Rs. " + amount);
-
-        }
-        catch (RemoteException e) {
-
-            log("PricingServer is unavailable.");
-
-            return "Payment failed: "
-                    + "PricingServer is unavailable ("
-                    + e.getMessage()
-                    + ").";
+            priceRes = pricing.calculatePrice(STATION_ID, energy, sendL3);
+            logicalClock.receiveEvent(priceRes.getTimestamp());
+            log("RECEIVE", "PricingServer calculatePrice response: Rs. " + priceRes.getData() + " (Pricing Lamport: " + priceRes.getTimestamp() + ")");
+        } catch (RemoteException e) {
+            log("LOCAL", "PricingServer is unavailable.");
+            long respL = logicalClock.sendEvent();
+            return new LamportResult<>("Payment failed: PricingServer is unavailable (" + e.getMessage() + ").", respL);
         }
 
+        double amount = priceRes.getData();
         if (amount < 0) {
-
-            log("PricingServer returned invalid price.");
-
-            return "Payment failed: "
-                    + "PricingServer returned "
-                    + "an invalid price.";
+            log("LOCAL", "PricingServer returned invalid price.");
+            long respL = logicalClock.sendEvent();
+            return new LamportResult<>("Payment failed: PricingServer returned an invalid price.", respL);
         }
 
-        // -----------------------------------------------------
         // STEP 4: Generate payment ID
-        // -----------------------------------------------------
-
-        log("Generating payment ID...");
-
-        simulateProcessing(500);
-
         String paymentId;
-
         synchronized (this) {
-            paymentId =
-                    "PAY-" + paymentCounter++;
+            paymentId = "PAY-" + paymentCounter++;
         }
-
-        log("Generated Payment ID: "
-                + paymentId);
-
-        // -----------------------------------------------------
-        // STEP 5: Store payment
-        // -----------------------------------------------------
-
-        log("Saving payment information...");
-
-        simulateProcessing(500);
 
         String status = "SUCCESS";
-
-        // -----------------------------------------------------
-        // STEP 6: Release Charging Port (Post-Payment Release)
-        // -----------------------------------------------------
-
         String releaseMessage = "";
 
+        // STEP 5: Post-Payment Port Release
         try {
+            long sendL4 = logicalClock.sendEvent();
+            log("SEND", "Contacting ChargingSessionServer.getSessionPort for Session " + sessionId + " (Lamport: " + sendL4 + ")");
 
-            String portId = chargingSession.getSessionPort(sessionId);
+            LamportResult<String> portRes = chargingSession.getSessionPort(sessionId, sendL4);
+            logicalClock.receiveEvent(portRes.getTimestamp());
+            log("RECEIVE", "ChargingSessionServer getSessionPort response: " + portRes.getData() + " (Session Lamport: " + portRes.getTimestamp() + ")");
 
+            String portId = portRes.getData();
             if (portId != null && !portId.equals("NONE") && chargingStation != null) {
+                long sendL5 = logicalClock.sendEvent();
+                log("SEND", "Payment SUCCESS. Contacting ChargingStationServer.releasePort for Port " + portId + " (Lamport: " + sendL5 + ")");
 
-                log("Payment SUCCESS. Requesting ChargingStationServer to release port: "
-                        + portId);
+                LamportResult<String> releaseRes = chargingStation.releasePort(portId, sendL5);
+                logicalClock.receiveEvent(releaseRes.getTimestamp());
+                log("RECEIVE", "ChargingStationServer releasePort response: " + releaseRes.getData() + " (Station Lamport: " + releaseRes.getTimestamp() + ")");
 
-                simulateProcessing(500);
-
-                String stationResult = chargingStation.releasePort(portId);
-
-                releaseMessage = "\nCharging Port Status: " + stationResult;
-
-                log("ChargingStationServer release response: " + stationResult);
+                releaseMessage = "\nCharging Port Status: " + releaseRes.getData();
             }
-
         } catch (Exception e) {
-
-            log("WARNING: Could not release charging port after payment: "
-                    + e.getMessage());
+            log("LOCAL", "WARNING: Could not release charging port after payment: " + e.getMessage());
         }
 
         String details =
@@ -332,67 +235,54 @@ public class PaymentServer
                 + releaseMessage;
 
         synchronized (this) {
-            paymentStatus.put(
-                    paymentId,
-                    status
-            );
-
-            paymentDetails.put(
-                    paymentId,
-                    details
-            );
+            paymentStatus.put(paymentId, status);
+            paymentDetails.put(paymentId, details);
+            logicalClock.tick();
+            log("LOCAL", "Payment " + paymentId + " stored successfully.");
         }
 
-        log("Payment stored successfully.");
+        String result = "Payment Successful!\n" + details;
+        long respL = logicalClock.sendEvent();
+        log("SEND", "Returning MAKE PAYMENT response to client (Lamport: " + respL + ")");
 
-        log("Payment ID: "
-                + paymentId
-                + " | Amount: Rs. "
-                + amount
-                + " | Status: SUCCESS");
-
-        log("MAKE PAYMENT task completed.");
-
-        return "Payment Successful!\n"
-                + details;
+        return new LamportResult<>(result, respL);
     }
 
     // =========================================================
     // GET PAYMENT STATUS
     // =========================================================
 
-    public String getPaymentStatus(
-            String paymentId)
+    @Override
+    public String getPaymentStatus(String paymentId) throws RemoteException {
+        return getPaymentStatus(paymentId, 0).getData();
+    }
+
+    @Override
+    public LamportResult<String> getPaymentStatus(
+            String paymentId,
+            long clientLamport)
             throws RemoteException {
 
-        log("GET PAYMENT STATUS request received for: "
-                + paymentId);
-
-        log("Searching payment database...");
+        long recvL = logicalClock.receiveEvent(clientLamport);
+        log("RECEIVE", "GET PAYMENT STATUS request for " + paymentId + " received (Client Lamport: " + clientLamport + "). Clock updated to " + recvL);
 
         simulateProcessing(400);
 
         synchronized (this) {
             if (!paymentStatus.containsKey(paymentId)) {
-
-                log("Payment not found: "
-                        + paymentId);
-
-                return "Payment not found.";
+                log("LOCAL", "Payment not found: " + paymentId);
+                long respL = logicalClock.sendEvent();
+                return new LamportResult<>("Payment not found.", respL);
             }
 
-            String status =
-                    paymentStatus.get(paymentId);
+            String status = paymentStatus.get(paymentId);
+            logicalClock.tick();
+            log("LOCAL", "Payment ID " + paymentId + " status: " + status);
 
-            log("Payment status returned: "
-                    + status);
-
-            log("GET PAYMENT STATUS task completed.");
-
-            return "Payment ID: "
-                    + paymentId
-                    + "\nPayment Status: "
-                    + status;
+            String result = "Payment ID: " + paymentId + "\nPayment Status: " + status;
+            long respL = logicalClock.sendEvent();
+            log("SEND", "Returning GET PAYMENT STATUS response (Lamport: " + respL + ")");
+            return new LamportResult<>(result, respL);
         }
     }
 
@@ -400,31 +290,36 @@ public class PaymentServer
     // GET PAYMENT DETAILS
     // =========================================================
 
-    public String getPaymentDetails(
-            String paymentId)
+    @Override
+    public String getPaymentDetails(String paymentId) throws RemoteException {
+        return getPaymentDetails(paymentId, 0).getData();
+    }
+
+    @Override
+    public LamportResult<String> getPaymentDetails(
+            String paymentId,
+            long clientLamport)
             throws RemoteException {
 
-        log("GET PAYMENT DETAILS request received for: "
-                + paymentId);
-
-        log("Searching payment database...");
+        long recvL = logicalClock.receiveEvent(clientLamport);
+        log("RECEIVE", "GET PAYMENT DETAILS request for " + paymentId + " received (Client Lamport: " + clientLamport + "). Clock updated to " + recvL);
 
         simulateProcessing(400);
 
         synchronized (this) {
             if (!paymentDetails.containsKey(paymentId)) {
-
-                log("Payment details not found: "
-                        + paymentId);
-
-                return "Payment not found.";
+                log("LOCAL", "Payment details not found: " + paymentId);
+                long respL = logicalClock.sendEvent();
+                return new LamportResult<>("Payment not found.", respL);
             }
 
-            log("Payment details retrieved successfully.");
+            String details = paymentDetails.get(paymentId);
+            logicalClock.tick();
+            log("LOCAL", "Payment details retrieved for " + paymentId);
 
-            log("GET PAYMENT DETAILS task completed.");
-
-            return paymentDetails.get(paymentId);
+            long respL = logicalClock.sendEvent();
+            log("SEND", "Returning GET PAYMENT DETAILS response (Lamport: " + respL + ")");
+            return new LamportResult<>(details, respL);
         }
     }
 
@@ -433,20 +328,13 @@ public class PaymentServer
     // =========================================================
 
     public static void main(String[] args) {
-
-        final String HOST =
-                "rmi://localhost:1237/PaymentServer";
+        final String HOST = "rmi://localhost:1237/PaymentServer";
 
         try {
-
             String rmiHost = System.getenv("RMI_SERVER_HOST");
             if (rmiHost != null && !rmiHost.trim().isEmpty()) {
                 System.setProperty("java.rmi.server.hostname", rmiHost);
             }
-
-            // -------------------------------------------------
-            // Connect to ChargingStationServer
-            // -------------------------------------------------
 
             String stationUrl = System.getenv("STATION_URL");
             if (stationUrl == null || stationUrl.trim().isEmpty()) {
@@ -465,42 +353,20 @@ public class PaymentServer
 
             while (retryCount < maxRetries) {
                 try {
-                    chargingStation =
-                            (ChargingStationInterface)
-                            Naming.lookup(stationUrl);
+                    chargingStation = (ChargingStationInterface) Naming.lookup(stationUrl);
                     System.out.println("ChargingStationServer connected.");
                     break;
                 } catch (Exception e) {
                     retryCount++;
-                    System.out.println("Waiting for ChargingStationServer...");
-                    System.out.println("Retry " + retryCount + "/" + maxRetries + "...");
-                    try {
-                        Thread.sleep(2000);
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                        break;
-                    }
+                    System.out.println("Waiting for ChargingStationServer... Retry " + retryCount + "/" + maxRetries + "...");
+                    try { Thread.sleep(2000); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
                 }
             }
 
             if (chargingStation == null) {
-
-                System.out.println(
-                        "Could not connect to "
-                        + "ChargingStationServer."
-                );
-
-                System.out.println(
-                        "Please start ChargingStationServer "
-                        + "on port 1234."
-                );
-
+                System.out.println("Could not connect to ChargingStationServer.");
                 return;
             }
-
-            // -------------------------------------------------
-            // Connect to ChargingSessionServer
-            // -------------------------------------------------
 
             String sessionUrl = System.getenv("SESSION_URL");
             if (sessionUrl == null || sessionUrl.trim().isEmpty()) {
@@ -518,42 +384,20 @@ public class PaymentServer
 
             while (retryCount < maxRetries) {
                 try {
-                    chargingSession =
-                            (ChargingSessionInterface)
-                            Naming.lookup(sessionUrl);
+                    chargingSession = (ChargingSessionInterface) Naming.lookup(sessionUrl);
                     System.out.println("ChargingSessionServer connected.");
                     break;
                 } catch (Exception e) {
                     retryCount++;
-                    System.out.println("Waiting for ChargingSessionServer...");
-                    System.out.println("Retry " + retryCount + "/" + maxRetries + "...");
-                    try {
-                        Thread.sleep(2000);
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                        break;
-                    }
+                    System.out.println("Waiting for ChargingSessionServer... Retry " + retryCount + "/" + maxRetries + "...");
+                    try { Thread.sleep(2000); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
                 }
             }
 
             if (chargingSession == null) {
-
-                System.out.println(
-                        "Could not connect to "
-                        + "ChargingSessionServer."
-                );
-
-                System.out.println(
-                        "Please start ChargingSessionServer "
-                        + "on port 1236."
-                );
-
+                System.out.println("Could not connect to ChargingSessionServer.");
                 return;
             }
-
-            // -------------------------------------------------
-            // Connect to PricingServer
-            // -------------------------------------------------
 
             String pricingUrl = System.getenv("PRICING_URL");
             if (pricingUrl == null || pricingUrl.trim().isEmpty()) {
@@ -571,90 +415,39 @@ public class PaymentServer
 
             while (retryCount < maxRetries) {
                 try {
-                    pricing =
-                            (PricingInterface)
-                            Naming.lookup(pricingUrl);
+                    pricing = (PricingInterface) Naming.lookup(pricingUrl);
                     System.out.println("PricingServer connected.");
                     break;
                 } catch (Exception e) {
                     retryCount++;
-                    System.out.println("Waiting for PricingServer...");
-                    System.out.println("Retry " + retryCount + "/" + maxRetries + "...");
-                    try {
-                        Thread.sleep(2000);
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                        break;
-                    }
+                    System.out.println("Waiting for PricingServer... Retry " + retryCount + "/" + maxRetries + "...");
+                    try { Thread.sleep(2000); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
                 }
             }
 
             if (pricing == null) {
-
-                System.out.println(
-                        "Could not connect to PricingServer."
-                );
-
-                System.out.println(
-                        "Please start PricingServer "
-                        + "on port 1238."
-                );
-
+                System.out.println("Could not connect to PricingServer.");
                 return;
             }
 
-            // -------------------------------------------------
-            // Start PaymentServer
-            // -------------------------------------------------
+            PaymentServer server = new PaymentServer(chargingSession, pricing, chargingStation);
 
-            System.out.println(
-                    "Starting Payment Server.........."
-            );
-
-            PaymentServer server =
-                    new PaymentServer(
-                            chargingSession,
-                            pricing,
-                            chargingStation
-                    );
-
-            System.out.println(
-                    "Payment Server Instance Created......."
-            );
-
-            // Create RMI registry on port 1237
             LocateRegistry.createRegistry(1237);
 
-            // Bind server to registry
-            Naming.bind(
-                    HOST,
-                    server
-            );
+            Naming.bind(HOST, server);
 
-            System.out.println(
-                    "Payment Server bound to registry successfully.."
-            );
+            System.out.println("Payment Server bound to registry successfully.");
 
-            System.out.println(
-                    "Payment Server Ready...."
-            );
+            try {
+                server.synchronizeClock();
+            } catch (Exception syncEx) {
+                System.out.println("Startup clock synchronization warning: " + syncEx.getMessage());
+            }
 
-            System.out.println(
-                    "Simulated processing delays: ENABLED"
-            );
+            System.out.println("Waiting for payment requests...");
 
-            System.out.println(
-                    "Waiting for payment requests..."
-            );
-
-        }
-        catch (Exception ex) {
-
-            System.out.println(
-                    "Exception : "
-                    + ex.getMessage()
-            );
-
+        } catch (Exception ex) {
+            System.out.println("Exception: " + ex.getMessage());
             ex.printStackTrace();
         }
     }

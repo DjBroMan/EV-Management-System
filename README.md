@@ -1,156 +1,70 @@
-# Java RMI EV Charging Network Management System (Dockerized)
+# Distributed EV Charging Network Management System
+### Java RMI, Docker, Lamport Logical Clocks & Cristian's Physical Clock Synchronization Algorithm
 
-A distributed Java RMI (Remote Method Invocation) system that manages an EV charging network across 5 containerized microservices orchestrated with Docker Compose.
-
----
-
-## 🚀 Architecture Overview
-
-The system consists of **5 independent RMI Servers** running inside dedicated Docker containers and **2 Client Applications** running on the host machine.
-
-```
-+-----------------------------------------------------------------------------------+
-|                                  WINDOWS HOST                                     |
-|                                                                                   |
-|   +-----------------------+                    +------------------------------+   |
-|   |     EVClient.java     |                    |    MultithreadTest.java      |   |
-|   +-----------+-----------+                    +--------------+---------------+   |
-|               |                                               |                   |
-|               +-----------------------+-----------------------+                   |
-|                                       | (Host RMI Lookups)                        |
-+---------------------------------------|-------------------------------------------+
-                                        v
-+-----------------------------------------------------------------------------------+
-|                        DOCKER NETWORK (ev-rmi-network)                            |
-|                                                                                   |
-|  +------------------------+  (Port 1234/2234)  +-----------------------------+  |
-|  |    charging-station    | <------------------ |         reservation         |  |
-|  +-----------+------------+                     +--------------+--------------+  |
-|              ^                                                 ^                 |
-|              |                                                 |                 |
-|              +-------------------------+                       |                 |
-|              |                         |                       |                 |
-|              v                         v                       v                 |
-|  +-----------+------------+  (Port 1238/2238)  +--------------+--------------+  |
-|  |        pricing         | <------------------ |      charging-session       |  |
-|  +-----------+------------+                     +--------------+--------------+  |
-|              ^                                                 ^                 |
-|              |                                                 |                 |
-|              +-------------------+   +-------------------------+                 |
-|                                  |   |                                           |
-|                                  v   v                                           |
-|                             +----+---+----------------+                          |
-|                             |         payment         |                          |
-|                             +-------------------------+                          |
-+-----------------------------------------------------------------------------------+
-```
+A distributed, microservice-based **EV Charging Network Management System** built with **Java RMI**, **Docker Compose**, **Lamport Logical Clocks**, and **Cristian's Physical Clock Synchronization Algorithm**.
 
 ---
 
-## ⚡ Services & Port Allocations
+## Quick Start
 
-Each RMI service exposes both an **RMI Registry Port** and an explicit **Remote Object Port** to ensure reliable cross-container communication.
+### 1. Build and Run with Docker Compose
+```bash
+# Build all Docker container images
+docker compose build
 
-| Service Name | RMI Service Name | Registry Port | Remote Object Port | Upstream Dependencies |
-|--------------|------------------|---------------|-------------------|-|
-| `charging-station` | `ChargingStationServer` | `1234` | `2234` | None |
-| `pricing` | `PricingService` | `1238` | `2238` | None |
-| `reservation` | `ReservationService` | `1235` | `2235` | `charging-station` |
-| `charging-session` | `ChargingSessionServer` | `1236` | `2236` | `charging-station`, `reservation` |
-| `payment` | `PaymentServer` | `1237` | `2237` | `charging-station`, `charging-session`, `pricing` |
-
----
-
-## 📋 Prerequisites
-
-- **Java JDK**: 17 or higher
-- **Docker**: 20.10+
-- **Docker Compose**: v2+
-
----
-
-## 🛠️ Quick Start Guide
-
-### 1. Compile the Java Source Code
-Compile all Java modules into the `bin/` directory:
-
-```powershell
-javac -d bin ChargingStation/*.java Reservation/*.java ChargingSession/*.java Pricing/*.java Payment/*.java EVClient.java MultithreadTest.java
+# Start all microservices in background
+docker compose up -d
 ```
 
-### 2. Build & Start Docker Containers
-Launch all 5 RMI microservices in detached mode:
+### 2. Run Multithreaded Test (10 EV Threads)
+```bash
+# Compile Java source files
+javac -d bin Clock/*.java ChargingStation/*.java Reservation/*.java ChargingSession/*.java Pricing/*.java Payment/*.java EVClient.java MultithreadTest.java
 
-```powershell
-docker compose up -d --build
-```
-
-Verify that all 5 containers are running:
-```powershell
-docker compose ps
-```
-
----
-
-## 🖥️ Running the Clients
-
-### Interactive Console App (`EVClient`)
-Run the unified EV client menu to step through the charging lifecycle interactively:
-
-```powershell
-java -cp bin EVClient
-```
-
-#### Workflow Example:
-1. Enter User ID (e.g. `USER-101`) and Vehicle ID (e.g. `EV-202`).
-2. Select **`1`** to check Station Status.
-3. Select **`4`** to Reserve a Charging Slot (assigns port e.g. `P1`).
-4. Select **`7`** to Start Charging (creates Session ID).
-5. Select **`9`** to Stop Charging (calculates energy e.g. `25.0 kWh`).
-6. Select **`10`** to Calculate Bill (queries `PricingServer`).
-7. Select **`11`** to Make Payment (processes payment & automatically releases port `P1`).
-
-### Concurrent Multithreaded Test (`MultithreadTest`)
-Simulate 10 EV threads concurrently making RMI calls to test port synchronization and server concurrency:
-
-```powershell
+# Run complete multithreaded test suite
 java -cp bin MultithreadTest
 ```
 
----
-
-## 🔍 Log Commands
-
-Inspect logs for all container services:
-```powershell
-docker compose logs -f
-```
-
-Inspect logs for a specific service:
-```powershell
-docker compose logs charging-station
-docker compose logs reservation
-docker compose logs charging-session
-docker compose logs pricing
-docker compose logs payment
-```
-
-Inspect the Dockerization change log:
-- [`log/docker_implementation.log`](file:///c:/Users/asus/Desktop/College/Sem%205/DC/Java/log/docker_implementation.log)
-
----
-
-## 🛑 Stopping the System
-
-Stop and remove all running containers and networks:
-
-```powershell
-docker compose down
+### 3. Run Interactive CLI Client
+```bash
+java -cp bin EVClient
 ```
 
 ---
 
-## 📚 Documentation
+## Microservice Architecture & Port Allocation
 
-For detailed technical specs, network topology, and troubleshooting guides, see:
-- [`docs/DOCKER.md`](file:///c:/Users/asus/Desktop/College/Sem%205/DC/Java/docs/DOCKER.md)
+| Microservice Container | Bound RMI Service Name | Registry Port | Export Port | Simulated Container Time (`libfaketime`) |
+|------------------------|------------------------|---------------|-------------|-----------------------------------------|
+| `time-server` | `TimeServer` | `1239` | `2239` | Host System Time (Reference) |
+| `charging-station` | `ChargingStationServer` | `1234` | `2234` | `2026-08-26 15:30:10` |
+| `reservation` | `ReservationService` | `1235` | `2235` | `2026-08-26 15:30:05` |
+| `charging-session` | `ChargingSessionServer` | `1236` | `2236` | `2026-08-26 15:29:55` |
+| `pricing` | `PricingService` | `1238` | `2238` | `2026-08-26 15:30:03` |
+| `payment` | `PaymentServer` | `1237` | `2237` | `2026-08-26 15:29:50` |
+
+---
+
+## Clock Synchronization Features
+
+1. **Lamport Logical Clock (`Clock/LogicalClock.java`)**:
+   - Maintains logical event order using lock-free `AtomicLong` CAS loop.
+   - Transmits and receives timestamps across RMI calls using `LamportResult<T>` serializable wrapper.
+   - Obeys Lamport receive rule: $L_{\text{receive}} = \max(L_{\text{local}}, L_{\text{received}}) + 1$.
+
+2. **Cristian Physical Clock Synchronization (`Clock/CristianClient.java`)**:
+   - Executes at server startup against `TimeServer` (port 1239/2239).
+   - Measures round-trip time ($RTT = T_1 - T_0$) and calculates physical clock offset ($\text{offset} = T_{\text{server}} + \frac{RTT}{2} - T_1$).
+
+---
+
+## Sample Verified Terminal Output
+
+```
+[Physical=2026-08-26 16:09:00.198] [Lamport=64] [CLIENT THREAD-32] USER-10 Reservation ID: RES1004
+[Physical=2026-08-26 16:09:04.613] [Lamport=94] [CLIENT THREAD-32] USER-10 Charging Start Response: Charging Started Successfully!
+[Physical=2026-08-26 16:09:06.748] [Lamport=106] [CLIENT THREAD-32] USER-10 Charging Stop Response: Charging Stopped Successfully!
+[Physical=2026-08-26 16:09:07.159] [Lamport=112] [CLIENT THREAD-32] USER-10 Energy Consumed: 25.0 kWh
+[Physical=2026-08-26 16:09:08.897] [Lamport=132] [CLIENT THREAD-32] USER-10 Calculated Price: Rs. 250.0
+[Physical=2026-08-26 16:09:12.752] [Lamport=198] [CLIENT THREAD-32] USER-10 Payment Response: Payment Successful! Port P4 released successfully. Now AVAILABLE.
+```

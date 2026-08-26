@@ -1,4 +1,16 @@
 services:
+  time-server:
+    build: .
+    container_name: time-server
+    command: java -cp /app/bin Clock.TimeServer
+    ports:
+      - "1239:1239"
+      - "2239:2239"
+    environment:
+      - RMI_SERVER_HOST=time-server
+    networks:
+      - ev-rmi-network
+
   charging-station:
     build: .
     container_name: charging-station
@@ -8,6 +20,11 @@ services:
       - "2234:2234"
     environment:
       - RMI_SERVER_HOST=charging-station
+      - TIME_SERVER_HOST=time-server
+      - LD_PRELOAD=/usr/lib/x86_64-linux-gnu/faketime/libfaketime.so.1
+      - FAKETIME=@2026-08-26 15:30:10
+    depends_on:
+      - time-server
     networks:
       - ev-rmi-network
 
@@ -20,6 +37,11 @@ services:
       - "2238:2238"
     environment:
       - RMI_SERVER_HOST=pricing
+      - TIME_SERVER_HOST=time-server
+      - LD_PRELOAD=/usr/lib/x86_64-linux-gnu/faketime/libfaketime.so.1
+      - FAKETIME=@2026-08-26 15:30:03
+    depends_on:
+      - time-server
     networks:
       - ev-rmi-network
 
@@ -33,7 +55,11 @@ services:
     environment:
       - RMI_SERVER_HOST=reservation
       - STATION_HOST=charging-station
+      - TIME_SERVER_HOST=time-server
+      - LD_PRELOAD=/usr/lib/x86_64-linux-gnu/faketime/libfaketime.so.1
+      - FAKETIME=@2026-08-26 15:30:05
     depends_on:
+      - time-server
       - charging-station
     networks:
       - ev-rmi-network
@@ -49,7 +75,11 @@ services:
       - RMI_SERVER_HOST=charging-session
       - STATION_HOST=charging-station
       - RESERVATION_HOST=reservation
+      - TIME_SERVER_HOST=time-server
+      - LD_PRELOAD=/usr/lib/x86_64-linux-gnu/faketime/libfaketime.so.1
+      - FAKETIME=@2026-08-26 15:29:55
     depends_on:
+      - time-server
       - charging-station
       - reservation
     networks:
@@ -67,7 +97,11 @@ services:
       - STATION_HOST=charging-station
       - SESSION_HOST=charging-session
       - PRICING_HOST=pricing
+      - TIME_SERVER_HOST=time-server
+      - LD_PRELOAD=/usr/lib/x86_64-linux-gnu/faketime/libfaketime.so.1
+      - FAKETIME=@2026-08-26 15:29:50
     depends_on:
+      - time-server
       - charging-station
       - charging-session
       - pricing

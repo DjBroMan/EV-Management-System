@@ -1,148 +1,76 @@
-# EV Charging Network Management System — RMI Interfaces & Communication Protocol
+# EV Charging Network Management System — RMI Communication Architecture
 
-## Remote Interfaces Summary
+## Overview
+Communication between client applications and microservice servers—as well as inter-server microservice communication—is performed exclusively using **Java Remote Method Invocation (Java RMI)**.
 
-The system defines 5 Java RMI Remote Interfaces, extending `java.rmi.Remote`, with all methods throwing `java.rmi.RemoteException`.
-
----
-
-## Interface Specifications
-
-### 1. `ChargingStationInterface`
-- **Package / Location**: `ChargingStation/ChargingStationInterface.java`
-- **Implemented By**: `ChargingStationServer` (Port 1234, URL: `rmi://localhost:1234//ChargingStationServer`)
-
-```java
-public interface ChargingStationInterface extends Remote {
-    String getStationStatus() throws RemoteException;
-    String getAvailablePorts() throws RemoteException;
-    String checkPortAvailability(String portId) throws RemoteException;
-    String reservePort(String portId) throws RemoteException;
-    String releasePort(String portId) throws RemoteException;
-    String reserveAnyAvailablePort() throws RemoteException;
-    String startPortCharging(String portId) throws RemoteException;
-}
-```
-
-| Method | Parameters | Return Value | Description |
-|--------|------------|--------------|-------------|
-| `getStationStatus` | None | String summary | Returns total available vs total ports on station. |
-| `getAvailablePorts` | None | Space-separated port IDs | Lists all currently AVAILABLE ports. |
-| `checkPortAvailability` | `portId` | Port status string | Checks status of a specific port (e.g. "P1 is AVAILABLE."). |
-| `reservePort` | `portId` | Confirmation string | Reserves specific port if AVAILABLE. |
-| `releasePort` | `portId` | Confirmation string | Releases port (RESERVED/CHARGING) back to AVAILABLE. |
-| `reserveAnyAvailablePort` | None | Port ID or `"NONE"` | Atomically finds and reserves first available port. |
-| `startPortCharging` | `portId` | `"CHARGING_STARTED"`, `"PORT_NOT_FOUND"`, `"PORT_NOT_RESERVED"` | Transitions RESERVED port to CHARGING. |
+Each microservice exports its remote objects on specific RMI registry and remote ports, and methods accept a `long clientLamport` parameter and return a `LamportResult<T>` serializable wrapper object containing both the operational result and the updated server Lamport timestamp.
 
 ---
 
-### 2. `ReservationInterface`
-- **Package / Location**: `Reservation/ReservationInterface.java`
-- **Implemented By**: `ReservationServer` (Port 1235, URL: `rmi://localhost:1235/ReservationService`)
+## Service Port Allocation & Registry Scheme
 
-```java
-public interface ReservationInterface extends Remote {
-    String reserveSlot(String userId, String vehicleId) throws RemoteException;
-    String cancelReservation(String reservationId) throws RemoteException;
-    String getReservation(String reservationId) throws RemoteException;
-    String getReservationPort(String reservationId) throws RemoteException;
-}
-```
-
-| Method | Parameters | Return Value | Description |
-|--------|------------|--------------|-------------|
-| `reserveSlot` | `userId`, `vehicleId` | Reservation details string | Allocates port via `ChargingStationServer` & creates reservation record. |
-| `cancelReservation` | `reservationId` | Status string | Cancels reservation & releases assigned port on station. |
-| `getReservation` | `reservationId` | Reservation details string | Retrieves full reservation details. |
-| `getReservationPort` | `reservationId` | Port ID or `"NONE"` | Returns charging port assigned to reservation. |
+| Microservice | RMI Service Name | Registry Port | Remote Object Export Port | Interfaces Implemented |
+|--------------|------------------|---------------|---------------------------|------------------------|
+| `TimeServer` | `TimeServer` | `1239` | `2239` | `TimeServerInterface` |
+| `ChargingStationServer` | `ChargingStationServer` | `1234` | `2234` | `ChargingStationInterface` |
+| `ReservationServer` | `ReservationService` | `1235` | `2235` | `ReservationInterface` |
+| `ChargingSessionServer` | `ChargingSessionServer` | `1236` | `2236` | `ChargingSessionInterface` |
+| `PaymentServer` | `PaymentServer` | `1237` | `2237` | `PaymentInterface` |
+| `PricingServer` | `PricingService` | `1238` | `2238` | `PricingInterface` |
 
 ---
 
-### 3. `ChargingSessionInterface`
-- **Package / Location**: `ChargingSession/ChargingSessionInterface.java`
-- **Implemented By**: `ChargingSessionServer` (Port 1236, URL: `rmi://localhost:1236/ChargingSessionServer`)
+## Inter-Service RMI Dependencies & Lamport Timestamp Propagation
 
-```java
-public interface ChargingSessionInterface extends Remote {
-    String startCharging(String reservationId) throws RemoteException;
-    String stopCharging(String sessionId) throws RemoteException;
-    String getSessionStatus(String sessionId) throws RemoteException;
-    double getEnergyConsumed(String sessionId) throws RemoteException;
-    String getSessionPort(String sessionId) throws RemoteException;
-}
 ```
-
-| Method | Parameters | Return Value | Description |
-|--------|------------|--------------|-------------|
-| `startCharging` | `reservationId` | Session confirmation string | Validates reservation, starts port charging, creates session. |
-| `stopCharging` | `sessionId` | Session summary string | Marks session COMPLETED & records energy consumed (port stays locked). |
-| `getSessionStatus` | `sessionId` | Status details string | Returns current status and energy consumed. |
-| `getEnergyConsumed` | `sessionId` | double (kWh) or `-1` | Returns numerical energy consumed for billing. |
-| `getSessionPort` | `sessionId` | Port ID or `"NONE"` | Returns port ID associated with session for post-payment release. |
++------------------+
+|     EVClient /   |
+| MultithreadTest  |
++--------+---------+
+         |
+         | RMI request + clientLamport (LamportResult response returned)
+         v
++------------------+     RMI + sendL     +-----------------------+
+|ReservationServer +-------------------->+ ChargingStationServer |
++--------+---------+                     +-----------^-----------+
+         |                                           |
+         | RMI + sendL                               | RMI + sendL (post-payment release)
+         v                                           |
++------------------+                                 |
+|ChargingSessionSrv+---------------------------------+
++--------+---------+
+         |
+         | RMI + sendL
+         v
++------------------+     RMI + sendL     +-----------------------+
+|  PaymentServer   +-------------------->+     PricingServer     |
++------------------+                     +-----------------------+
+```
 
 ---
 
-### 4. `PricingInterface`
-- **Package / Location**: `Pricing/PricingInterface.java`
-- **Implemented By**: `PricingServer` (Port 1238, URL: `rmi://localhost:1238/PricingService`)
+## Lamport Timestamp Rules in RMI Calls
 
-```java
-public interface PricingInterface extends Remote {
-    double calculatePrice(String stationId, double energyConsumed) throws RemoteException;
-    double getDemandMultiplier(String stationId) throws RemoteException;
-}
-```
+1. **Client / Sender SEND Event**:
+   `long sendL = clock.sendEvent();` ($L = L + 1$)
+   Sender passes `sendL` as parameter to remote RMI method.
 
-| Method | Parameters | Return Value | Description |
-|--------|------------|--------------|-------------|
-| `calculatePrice` | `stationId`, `energyConsumed` | double (Rs.) or `-1` | Computes price = `BASE_PRICE * energy * demandMultiplier`. |
-| `getDemandMultiplier` | `stationId` | double multiplier | Returns multiplier based on station demand level (LOW=1.0, MED=1.25, HIGH=1.5). |
+2. **Server RECEIVE Event**:
+   `long recvL = clock.receiveEvent(clientLamport);` ($L = \max(L_{\text{local}}, \text{clientLamport}) + 1$)
+   Server logs `[Event=RECEIVE]` tag.
 
----
+3. **Server LOCAL Event**:
+   `clock.tick();` ($L = L + 1$)
+   Server updates internal state, logs `[Event=LOCAL]` tag.
 
-### 5. `PaymentInterface`
-- **Package / Location**: `Payment/PaymentInterface.java`
-- **Implemented By**: `PaymentServer` (Port 1237, URL: `rmi://localhost:1237/PaymentServer`)
+4. **Server Inter-Service RMI Call**:
+   `long interSendL = clock.sendEvent();`
+   Server logs `[Event=SEND]` tag and invokes downstream RMI server.
 
-```java
-public interface PaymentInterface extends Remote {
-    String makePayment(String sessionId) throws RemoteException;
-    String getPaymentStatus(String paymentId) throws RemoteException;
-    String getPaymentDetails(String paymentId) throws RemoteException;
-}
-```
+5. **Server Return Response**:
+   `long respL = clock.sendEvent();`
+   Server logs `[Event=SEND]` and returns `new LamportResult<>(data, respL)`.
 
-| Method | Parameters | Return Value | Description |
-|--------|------------|--------------|-------------|
-| `makePayment` | `sessionId` | Payment summary string | Verifies completed session, gets energy & price, creates receipt, and releases charging port on station. |
-| `getPaymentStatus` | `paymentId` | Status string | Checks payment status (`SUCCESS`). |
-| `getPaymentDetails` | `paymentId` | Full receipt string | Returns full payment breakdown. |
-
----
-
-## Inter-Server Call Paths Matrix
-
-```
-Client (EVClient / MultithreadTest)
-   │
-   ├──► ReservationServer.reserveSlot()
-   │       └──► ChargingStationServer.reserveAnyAvailablePort()
-   │
-   ├──► ChargingSessionServer.startCharging()
-   │       ├──► ReservationServer.getReservation()
-   │       ├──► ReservationServer.getReservationPort()
-   │       └──► ChargingStationServer.startPortCharging()
-   │
-   ├──► ChargingSessionServer.stopCharging()
-   │       └──► (Updates local state only; does NOT touch ChargingStationServer)
-   │
-   ├──► PricingServer.calculatePrice()
-   │       └──► (Calculates price based on demand map)
-   │
-   └──► PaymentServer.makePayment()
-           ├──► ChargingSessionServer.getSessionStatus()
-           ├──► ChargingSessionServer.getEnergyConsumed()
-           ├──► PricingServer.calculatePrice()
-           ├──► ChargingSessionServer.getSessionPort()
-           └──► ChargingStationServer.releasePort()  <-- Post-Payment Release!
-```
+6. **Client / Sender RECEIVE Response Event**:
+   `clock.receiveEvent(response.getTimestamp());`
+   Caller updates local clock to $\max(L_{\text{caller}}, \text{response.getTimestamp()}) + 1$.

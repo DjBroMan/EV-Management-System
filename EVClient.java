@@ -1,5 +1,8 @@
 import java.rmi.Naming;
 import java.util.Scanner;
+import Clock.LogicalClock;
+import Clock.PhysicalClock;
+import Clock.LamportResult;
 
 // Unified EV / mobile-app style console client. This is an RMI client only --
 // it never binds or exports anything itself, it just looks up the five
@@ -7,14 +10,13 @@ import java.util.Scanner;
 // per-module clients exercise, from one menu.
 public class EVClient {
 
-    // This project only manages a single charging station (EV-STATION-01).
-    // PricingServer's demand profiles are keyed by IDs like "S01", so that is
-    // the profile used for the project's one station (same convention
-    // PaymentServer uses internally when it calculates a bill).
     private static final String STATION_ID = "S01";
 
     private static String userId;
     private static String vehicleId;
+
+    // Client-side Lamport Logical Clock
+    private static final LogicalClock clientClock = new LogicalClock();
 
     // Remembers the most recent IDs so later menu options can default to them
     private static String lastReservationId = null;
@@ -29,7 +31,7 @@ public class EVClient {
                 public java.net.Socket createSocket(String host, int port) throws java.io.IOException {
                     if ("charging-station".equals(host) || "reservation".equals(host) ||
                         "charging-session".equals(host) || "pricing".equals(host) ||
-                        "payment".equals(host)) {
+                        "payment".equals(host) || "time-server".equals(host)) {
                         host = "localhost";
                     }
                     return new java.net.Socket(host, port);
@@ -95,6 +97,7 @@ public class EVClient {
         System.out.println();
         System.out.println("========================================");
         System.out.println("             EV CHARGING APP");
+        System.out.println(" [Physical=" + PhysicalClock.getLocalPhysicalTimeFormatted() + " | Lamport=" + clientClock.getValue() + "]");
         System.out.println("========================================");
         System.out.println("1. View Station Status");
         System.out.println("2. View Available Ports");
@@ -112,11 +115,6 @@ public class EVClient {
         System.out.println("14. Exit");
         System.out.println("========================================");
     }
-
-    // ---------------------------------------------------------------
-    // Remote lookups (done per-call, so a server that (re)starts later
-    // is picked up without restarting EVClient)
-    // ---------------------------------------------------------------
 
     private static String getEnvHost(String envVar, String defaultHost) {
         String host = System.getenv(envVar);
@@ -160,8 +158,12 @@ public class EVClient {
     private static void viewStationStatus() {
         try {
             ChargingStationInterface chargingStation = lookupChargingStation();
+            long sendL = clientClock.sendEvent();
+            LamportResult<String> res = chargingStation.getStationStatus(sendL);
+            clientClock.receiveEvent(res.getTimestamp());
+
             System.out.println();
-            System.out.println(chargingStation.getStationStatus());
+            System.out.println(res.getData());
         } catch (Exception e) {
             stationUnavailable();
         }
@@ -170,8 +172,12 @@ public class EVClient {
     private static void viewAvailablePorts() {
         try {
             ChargingStationInterface chargingStation = lookupChargingStation();
+            long sendL = clientClock.sendEvent();
+            LamportResult<String> res = chargingStation.getAvailablePorts(sendL);
+            clientClock.receiveEvent(res.getTimestamp());
+
             System.out.println();
-            System.out.println(chargingStation.getAvailablePorts());
+            System.out.println(res.getData());
         } catch (Exception e) {
             stationUnavailable();
         }
@@ -183,8 +189,12 @@ public class EVClient {
 
         try {
             ChargingStationInterface chargingStation = lookupChargingStation();
+            long sendL = clientClock.sendEvent();
+            LamportResult<String> res = chargingStation.checkPortAvailability(portId, sendL);
+            clientClock.receiveEvent(res.getTimestamp());
+
             System.out.println();
-            System.out.println(chargingStation.checkPortAvailability(portId));
+            System.out.println(res.getData());
         } catch (Exception e) {
             stationUnavailable();
         }
@@ -193,8 +203,11 @@ public class EVClient {
     private static void reserveSlot() {
         try {
             ReservationInterface reservation = lookupReservation();
-            String result = reservation.reserveSlot(userId, vehicleId);
+            long sendL = clientClock.sendEvent();
+            LamportResult<String> res = reservation.reserveSlot(userId, vehicleId, sendL);
+            clientClock.receiveEvent(res.getTimestamp());
 
+            String result = res.getData();
             System.out.println();
             System.out.println(result);
 
@@ -212,8 +225,12 @@ public class EVClient {
 
         try {
             ReservationInterface reservation = lookupReservation();
+            long sendL = clientClock.sendEvent();
+            LamportResult<String> res = reservation.getReservation(reservationId, sendL);
+            clientClock.receiveEvent(res.getTimestamp());
+
             System.out.println();
-            System.out.println(reservation.getReservation(reservationId));
+            System.out.println(res.getData());
         } catch (Exception e) {
             reservationUnavailable();
         }
@@ -224,8 +241,11 @@ public class EVClient {
 
         try {
             ReservationInterface reservation = lookupReservation();
-            String result = reservation.cancelReservation(reservationId);
+            long sendL = clientClock.sendEvent();
+            LamportResult<String> res = reservation.cancelReservation(reservationId, sendL);
+            clientClock.receiveEvent(res.getTimestamp());
 
+            String result = res.getData();
             System.out.println();
             System.out.println(result);
 
@@ -242,8 +262,11 @@ public class EVClient {
 
         try {
             ChargingSessionInterface chargingSession = lookupChargingSession();
-            String result = chargingSession.startCharging(reservationId);
+            long sendL = clientClock.sendEvent();
+            LamportResult<String> res = chargingSession.startCharging(reservationId, sendL);
+            clientClock.receiveEvent(res.getTimestamp());
 
+            String result = res.getData();
             System.out.println();
             System.out.println(result);
 
@@ -261,8 +284,12 @@ public class EVClient {
 
         try {
             ChargingSessionInterface chargingSession = lookupChargingSession();
+            long sendL = clientClock.sendEvent();
+            LamportResult<String> res = chargingSession.getSessionStatus(sessionId, sendL);
+            clientClock.receiveEvent(res.getTimestamp());
+
             System.out.println();
-            System.out.println(chargingSession.getSessionStatus(sessionId));
+            System.out.println(res.getData());
         } catch (Exception e) {
             sessionUnavailable();
         }
@@ -273,22 +300,27 @@ public class EVClient {
 
         try {
             ChargingSessionInterface chargingSession = lookupChargingSession();
+            long sendL = clientClock.sendEvent();
+            LamportResult<String> res = chargingSession.stopCharging(sessionId, sendL);
+            clientClock.receiveEvent(res.getTimestamp());
+
             System.out.println();
-            System.out.println(chargingSession.stopCharging(sessionId));
+            System.out.println(res.getData());
         } catch (Exception e) {
             sessionUnavailable();
         }
     }
 
-    // Calculate Bill: pulls the real energy consumed from ChargingSessionServer,
-    // then asks PricingServer for the real price. Nothing here is invented locally.
     private static void calculateBill(Scanner sc) {
         String sessionId = promptWithDefault(sc, "Enter Session ID", lastSessionId);
 
         double energy;
         try {
             ChargingSessionInterface chargingSession = lookupChargingSession();
-            energy = chargingSession.getEnergyConsumed(sessionId);
+            long sendL = clientClock.sendEvent();
+            LamportResult<Double> energyRes = chargingSession.getEnergyConsumed(sessionId, sendL);
+            clientClock.receiveEvent(energyRes.getTimestamp());
+            energy = energyRes.getData();
         } catch (Exception e) {
             sessionUnavailable();
             return;
@@ -296,14 +328,16 @@ public class EVClient {
 
         if (energy < 0) {
             System.out.println();
-            System.out.println("No energy data found for session " + sessionId +
-                    " (has charging finished yet?).");
+            System.out.println("No energy data found for session " + sessionId + " (has charging finished yet?).");
             return;
         }
 
         try {
             PricingInterface pricing = lookupPricing();
-            double price = pricing.calculatePrice(STATION_ID, energy);
+            long sendL = clientClock.sendEvent();
+            LamportResult<Double> priceRes = pricing.calculatePrice(STATION_ID, energy, sendL);
+            clientClock.receiveEvent(priceRes.getTimestamp());
+            double price = priceRes.getData();
 
             System.out.println();
             System.out.println("Session ID: " + sessionId);
@@ -324,8 +358,11 @@ public class EVClient {
 
         try {
             PaymentInterface payment = lookupPayment();
-            String result = payment.makePayment(sessionId);
+            long sendL = clientClock.sendEvent();
+            LamportResult<String> res = payment.makePayment(sessionId, sendL);
+            clientClock.receiveEvent(res.getTimestamp());
 
+            String result = res.getData();
             System.out.println();
             System.out.println(result);
 
@@ -343,8 +380,12 @@ public class EVClient {
 
         try {
             PaymentInterface payment = lookupPayment();
+            long sendL = clientClock.sendEvent();
+            LamportResult<String> res = payment.getPaymentStatus(paymentId, sendL);
+            clientClock.receiveEvent(res.getTimestamp());
+
             System.out.println();
-            System.out.println(payment.getPaymentStatus(paymentId));
+            System.out.println(res.getData());
         } catch (Exception e) {
             paymentUnavailable();
         }
@@ -355,16 +396,16 @@ public class EVClient {
 
         try {
             PaymentInterface payment = lookupPayment();
+            long sendL = clientClock.sendEvent();
+            LamportResult<String> res = payment.getPaymentDetails(paymentId, sendL);
+            clientClock.receiveEvent(res.getTimestamp());
+
             System.out.println();
-            System.out.println(payment.getPaymentDetails(paymentId));
+            System.out.println(res.getData());
         } catch (Exception e) {
             paymentUnavailable();
         }
     }
-
-    // ---------------------------------------------------------------
-    // Helpers
-    // ---------------------------------------------------------------
 
     private static String promptWithDefault(Scanner sc, String label, String defaultValue) {
         if (defaultValue != null) {
@@ -382,58 +423,31 @@ public class EVClient {
         return input;
     }
 
-    // Pulls a "Label: value" token out of a server response, stopping at the
-    // next comma or newline. Same convention used by MultithreadedReservationClient.
     private static String extractField(String text, String label) {
         int start = text.indexOf(label);
-
-        if (start == -1) {
-            return null;
-        }
-
+        if (start == -1) return null;
         start += label.length();
-
         int endComma = text.indexOf(",", start);
         int endNewline = text.indexOf("\n", start);
         int end = text.length();
-
-        if (endComma != -1) {
-            end = Math.min(end, endComma);
-        }
-        if (endNewline != -1) {
-            end = Math.min(end, endNewline);
-        }
-
+        if (endComma != -1) end = Math.min(end, endComma);
+        if (endNewline != -1) end = Math.min(end, endNewline);
         return text.substring(start, end).trim();
     }
 
     private static void stationUnavailable() {
-        System.out.println();
-        System.out.println("Charging Station Server unavailable.");
-        System.out.println("Please start the ChargingStationServer first.");
+        System.out.println("\nCharging Station Server unavailable.\nPlease start the ChargingStationServer first.");
     }
-
     private static void reservationUnavailable() {
-        System.out.println();
-        System.out.println("Reservation Server unavailable.");
-        System.out.println("Please start the ReservationServer first.");
+        System.out.println("\nReservation Server unavailable.\nPlease start the ReservationServer first.");
     }
-
     private static void sessionUnavailable() {
-        System.out.println();
-        System.out.println("Charging Session Server unavailable.");
-        System.out.println("Please start the ChargingSessionServer first.");
+        System.out.println("\nCharging Session Server unavailable.\nPlease start the ChargingSessionServer first.");
     }
-
     private static void pricingUnavailable() {
-        System.out.println();
-        System.out.println("Pricing Server unavailable.");
-        System.out.println("Please start the PricingServer first.");
+        System.out.println("\nPricing Server unavailable.\nPlease start the PricingServer first.");
     }
-
     private static void paymentUnavailable() {
-        System.out.println();
-        System.out.println("Payment Server unavailable.");
-        System.out.println("Please start the PaymentServer first.");
+        System.out.println("\nPayment Server unavailable.\nPlease start the PaymentServer first.");
     }
 }

@@ -1,11 +1,13 @@
 # EV Charging Network Management System — State Management & Transitions
 
 ## Overview
-State management in this system covers four distinct entities:
-1. **Charging Port** (managed by `ChargingStationServer`)
-2. **Reservation** (managed by `ReservationServer`)
-3. **Charging Session** (managed by `ChargingSessionServer`)
-4. **Payment** (managed by `PaymentServer`)
+State management in this system covers six distinct entities:
+1. **Charging Port State** (managed by `ChargingStationServer`)
+2. **Reservation State** (managed by `ReservationServer`)
+3. **Charging Session State** (managed by `ChargingSessionServer`)
+4. **Payment State** (managed by `PaymentServer`)
+5. **Lamport Logical Clock State** (maintained independently per server via `LogicalClock`)
+6. **Cristian Physical Clock Offset State** (maintained via `PhysicalClock`)
 
 ---
 
@@ -69,3 +71,12 @@ State management in this system covers four distinct entities:
 | Current State | Target State | Trigger Method | Controlling Server | Description |
 |---------------|--------------|----------------|--------------------|-------------|
 | `PENDING` | `SUCCESS` | `makePayment(sessionId)` | `PaymentServer` | Session verified `COMPLETED`, energy retrieved, price calculated, receipt stored as `SUCCESS`, port released to `AVAILABLE`. |
+
+---
+
+## 5. Lamport Logical Clock & Physical Clock Offset State
+
+| Clock Entity | State Variable | Update Mechanism | Synchronization Guarantee |
+|--------------|----------------|------------------|---------------------------|
+| `LogicalClock` | `AtomicLong clock` | `tick()` ($L+1$), `sendEvent()` ($L+1$), `receiveEvent()` ($\max(L, \text{recv})+1$) | Atomic lock-free CAS thread-safety |
+| `PhysicalClock` | `volatile long clockOffsetMs` | Cristian algorithm ($T_1 + RTT/2 - \text{LocalTime}$) | Volatile visibility across server threads |

@@ -1,385 +1,352 @@
 import java.rmi.*;
 import java.rmi.server.*;
 import java.rmi.registry.*;
+import Clock.LogicalClock;
+import Clock.PhysicalClock;
+import Clock.CristianClient;
+import Clock.DistributedLogger;
+import Clock.LamportResult;
 
 public class ChargingStationServer
         extends UnicastRemoteObject
-        implements ChargingStationInterface
-{
-    private String[] ports = {"P1", "P2", "P3", "P4"};
+        implements ChargingStationInterface {
 
-    private String[] portStatus =
-            {"AVAILABLE", "AVAILABLE", "AVAILABLE", "AVAILABLE"};
+    private static final String SERVER_NAME = "ChargingStationServer";
+    private final LogicalClock logicalClock = new LogicalClock();
 
-    public ChargingStationServer() throws RemoteException
-    {
+    private String[] ports = { "P1", "P2", "P3", "P4" };
+    private String[] portStatus = { "AVAILABLE", "AVAILABLE", "AVAILABLE", "AVAILABLE" };
+
+    public ChargingStationServer() throws RemoteException {
         super(2234);
     }
 
-    // =========================================================
-    // THREAD LOGGING
-    // =========================================================
-
-    private void log(String message)
-    {
-        System.out.println(
-                "[Thread-" +
-                Thread.currentThread().getId() +
-                " | " +
-                Thread.currentThread().getName() +
-                "] " +
-                message
-        );
+    private void log(String message) {
+        DistributedLogger.log(SERVER_NAME, logicalClock, message);
     }
 
-    // =========================================================
-    // SIMULATED PROCESSING DELAY
-    // =========================================================
+    private void log(String eventType, String message) {
+        DistributedLogger.log(SERVER_NAME, logicalClock, eventType, message);
+    }
 
-    private void simulateProcessing(long milliseconds)
-    {
-        try
-        {
+    private void simulateProcessing(long milliseconds) {
+        try {
             Thread.sleep(milliseconds);
-        }
-        catch (InterruptedException e)
-        {
+        } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-
             log("Thread interrupted during processing.");
         }
     }
 
-    // =========================================================
-    // FIND PORT
-    // =========================================================
-
-    private int indexOfPort(String portId)
-    {
-        for (int i = 0; i < ports.length; i++)
-        {
-            if (ports[i].equalsIgnoreCase(portId))
-            {
+    private int indexOfPort(String portId) {
+        for (int i = 0; i < ports.length; i++) {
+            if (ports[i].equalsIgnoreCase(portId)) {
                 return i;
             }
         }
-
         return -1;
+    }
+
+    @Override
+    public String synchronizeClock() throws RemoteException {
+        logicalClock.tick();
+        log("LOCAL", "Initiating Cristian Physical Clock Synchronization...");
+        String timeServerHost = System.getenv("TIME_SERVER_HOST");
+        if (timeServerHost == null || timeServerHost.trim().isEmpty()) {
+            timeServerHost = "localhost";
+        }
+        String timeServerUrl = "rmi://" + timeServerHost + ":1239/TimeServer";
+        CristianClient.SyncResult res = CristianClient.synchronize(SERVER_NAME, timeServerUrl);
+        logicalClock.tick();
+        if (res.success) {
+            log("LOCAL", "Clock synchronization completed successfully. Calculated offset: " + res.clockOffsetMs + " ms");
+            return "Clock synchronized successfully. Offset: " + res.clockOffsetMs + " ms";
+        } else {
+            log("LOCAL", "Clock synchronization failed: " + res.errorMessage);
+            return "Clock synchronization failed: " + res.errorMessage;
+        }
     }
 
     // =========================================================
     // STATION STATUS
     // =========================================================
 
-    public synchronized String getStationStatus()
-            throws RemoteException
-    {
-        log("GET STATION STATUS request received.");
+    @Override
+    public String getStationStatus() throws RemoteException {
+        return getStationStatus(0).getData();
+    }
+
+    @Override
+    public synchronized LamportResult<String> getStationStatus(long clientLamport) throws RemoteException {
+        long recvL = logicalClock.receiveEvent(clientLamport);
+        log("RECEIVE", "GET STATION STATUS request received from client (Client Lamport: " + clientLamport + "). Clock updated to " + recvL);
 
         simulateProcessing(500);
 
         int availablePorts = 0;
-
-        for (String status : portStatus)
-        {
-            if (status.equals("AVAILABLE"))
-            {
+        for (String status : portStatus) {
+            if (status.equals("AVAILABLE")) {
                 availablePorts++;
             }
         }
 
-        log("Available ports: "
-                + availablePorts + "/" + ports.length);
+        logicalClock.tick();
+        log("LOCAL", "Available ports: " + availablePorts + "/" + ports.length);
 
-        log("GET STATION STATUS completed.");
+        String result = "Station EV-STATION-01: " + availablePorts + " of " + ports.length + " ports available.";
+        long sendL = logicalClock.sendEvent();
+        log("SEND", "Returning GET STATION STATUS response (Lamport: " + sendL + ")");
 
-        return "Station EV-STATION-01: "
-                + availablePorts
-                + " of "
-                + ports.length
-                + " ports available.";
+        return new LamportResult<>(result, sendL);
     }
 
     // =========================================================
     // AVAILABLE PORTS
     // =========================================================
 
-    public synchronized String getAvailablePorts()
-            throws RemoteException
-    {
-        log("GET AVAILABLE PORTS request received.");
+    @Override
+    public String getAvailablePorts() throws RemoteException {
+        return getAvailablePorts(0).getData();
+    }
+
+    @Override
+    public synchronized LamportResult<String> getAvailablePorts(long clientLamport) throws RemoteException {
+        long recvL = logicalClock.receiveEvent(clientLamport);
+        log("RECEIVE", "GET AVAILABLE PORTS request received (Client Lamport: " + clientLamport + "). Clock updated to " + recvL);
 
         simulateProcessing(500);
 
         String result = "Available Ports: ";
-
         boolean found = false;
 
-        for (int i = 0; i < ports.length; i++)
-        {
-            if (portStatus[i].equals("AVAILABLE"))
-            {
+        for (int i = 0; i < ports.length; i++) {
+            if (portStatus[i].equals("AVAILABLE")) {
                 result += ports[i] + " ";
                 found = true;
             }
         }
 
-        if (!found)
-        {
-            log("No available ports.");
-
-            return "No ports are currently available.";
+        if (!found) {
+            result = "No ports are currently available.";
         }
 
-        log("Available ports: " + result);
+        logicalClock.tick();
+        log("LOCAL", "Available ports: " + result);
 
-        log("GET AVAILABLE PORTS completed.");
+        long sendL = logicalClock.sendEvent();
+        log("SEND", "Returning GET AVAILABLE PORTS response (Lamport: " + sendL + ")");
 
-        return result;
+        return new LamportResult<>(result, sendL);
     }
 
     // =========================================================
     // CHECK PORT
     // =========================================================
 
-    public synchronized String checkPortAvailability(
-            String portId)
-            throws RemoteException
-    {
-        log("CHECK PORT request: " + portId);
+    @Override
+    public String checkPortAvailability(String portId) throws RemoteException {
+        return checkPortAvailability(portId, 0).getData();
+    }
+
+    @Override
+    public synchronized LamportResult<String> checkPortAvailability(String portId, long clientLamport) throws RemoteException {
+        long recvL = logicalClock.receiveEvent(clientLamport);
+        log("RECEIVE", "CHECK PORT request for " + portId + " received (Client Lamport: " + clientLamport + "). Clock updated to " + recvL);
 
         simulateProcessing(500);
 
         int i = indexOfPort(portId);
-
-        if (i == -1)
-        {
-            log("Port does not exist.");
-
-            return "Port " + portId
-                    + " does not exist.";
+        String result;
+        if (i == -1) {
+            result = "Port " + portId + " does not exist.";
+        } else {
+            result = "Port " + ports[i] + " is " + portStatus[i] + ".";
         }
 
-        log("Port " + ports[i]
-                + " status: "
-                + portStatus[i]);
+        logicalClock.tick();
+        log("LOCAL", "Port status check result: " + result);
 
-        return "Port " + ports[i]
-                + " is "
-                + portStatus[i]
-                + ".";
+        long sendL = logicalClock.sendEvent();
+        log("SEND", "Returning CHECK PORT response (Lamport: " + sendL + ")");
+
+        return new LamportResult<>(result, sendL);
     }
 
     // =========================================================
     // RESERVE PORT
     // =========================================================
 
-    public synchronized String reservePort(
-            String portId)
-            throws RemoteException
-    {
-        log("RESERVE PORT request: " + portId);
+    @Override
+    public String reservePort(String portId) throws RemoteException {
+        return reservePort(portId, 0).getData();
+    }
 
-        log("Checking port availability...");
+    @Override
+    public synchronized LamportResult<String> reservePort(String portId, long clientLamport) throws RemoteException {
+        long recvL = logicalClock.receiveEvent(clientLamport);
+        log("RECEIVE", "RESERVE PORT request for " + portId + " received (Client Lamport: " + clientLamport + "). Clock updated to " + recvL);
 
         simulateProcessing(700);
 
         int i = indexOfPort(portId);
+        String result;
 
-        if (i == -1)
-        {
-            log("Port does not exist.");
-
-            return "Port " + portId
-                    + " does not exist.";
+        if (i == -1) {
+            result = "Port " + portId + " does not exist.";
+        } else if (!portStatus[i].equals("AVAILABLE")) {
+            result = "Port " + ports[i] + " is currently " + portStatus[i] + " and cannot be reserved.";
+        } else {
+            portStatus[i] = "RESERVED";
+            result = "Port " + ports[i] + " reserved successfully.";
+            logicalClock.tick();
+            log("LOCAL", "Port " + ports[i] + " status changed to RESERVED.");
         }
 
-        if (!portStatus[i].equals("AVAILABLE"))
-        {
-            log("Port " + ports[i]
-                    + " is "
-                    + portStatus[i]);
+        long sendL = logicalClock.sendEvent();
+        log("SEND", "Returning RESERVE PORT response (Lamport: " + sendL + ")");
 
-            return "Port " + ports[i]
-                    + " is currently "
-                    + portStatus[i]
-                    + " and cannot be reserved.";
-        }
-
-        log("Port available. Reserving...");
-
-        simulateProcessing(500);
-
-        portStatus[i] = "RESERVED";
-
-        log("Port " + ports[i]
-                + " changed to RESERVED.");
-
-        return "Port " + ports[i]
-                + " reserved successfully.";
+        return new LamportResult<>(result, sendL);
     }
 
     // =========================================================
     // RELEASE PORT
     // =========================================================
 
-    public synchronized String releasePort(
-            String portId)
-            throws RemoteException
-    {
-        log("RELEASE PORT request: " + portId);
+    @Override
+    public String releasePort(String portId) throws RemoteException {
+        return releasePort(portId, 0).getData();
+    }
+
+    @Override
+    public synchronized LamportResult<String> releasePort(String portId, long clientLamport) throws RemoteException {
+        long recvL = logicalClock.receiveEvent(clientLamport);
+        log("RECEIVE", "RELEASE PORT request for " + portId + " received (Client Lamport: " + clientLamport + "). Clock updated to " + recvL);
 
         simulateProcessing(500);
 
         int i = indexOfPort(portId);
+        String result;
 
-        if (i == -1)
-        {
-            return "Port " + portId
-                    + " does not exist.";
+        if (i == -1) {
+            result = "Port " + portId + " does not exist.";
+        } else {
+            portStatus[i] = "AVAILABLE";
+            result = "Port " + ports[i] + " released successfully. Now AVAILABLE.";
+            logicalClock.tick();
+            log("LOCAL", "Port " + portId + " status changed to AVAILABLE.");
         }
 
-        portStatus[i] = "AVAILABLE";
+        long sendL = logicalClock.sendEvent();
+        log("SEND", "Returning RELEASE PORT response (Lamport: " + sendL + ")");
 
-        log("Port " + portId
-                + " changed to AVAILABLE.");
-
-        return "Port " + ports[i]
-                + " released successfully. "
-                + "Now AVAILABLE.";
+        return new LamportResult<>(result, sendL);
     }
 
     // =========================================================
     // RESERVE ANY AVAILABLE PORT
     // =========================================================
 
-    public synchronized String reserveAnyAvailablePort()
-            throws RemoteException
-    {
-        log("RESERVE ANY AVAILABLE PORT request received.");
+    @Override
+    public String reserveAnyAvailablePort() throws RemoteException {
+        return reserveAnyAvailablePort(0).getData();
+    }
 
-        log("Scanning charging ports...");
+    @Override
+    public synchronized LamportResult<String> reserveAnyAvailablePort(long clientLamport) throws RemoteException {
+        long recvL = logicalClock.receiveEvent(clientLamport);
+        log("RECEIVE", "RESERVE ANY AVAILABLE PORT request received (Client Lamport: " + clientLamport + "). Clock updated to " + recvL);
 
         simulateProcessing(700);
 
-        for (int i = 0; i < ports.length; i++)
-        {
-            log("Checking "
-                    + ports[i]
-                    + " -> "
-                    + portStatus[i]);
-
-            if (portStatus[i].equals("AVAILABLE"))
-            {
-                log("Available port found: "
-                        + ports[i]);
-
-                log("Simulating port reservation...");
-
-                simulateProcessing(700);
-
+        for (int i = 0; i < ports.length; i++) {
+            if (portStatus[i].equals("AVAILABLE")) {
                 portStatus[i] = "RESERVED";
+                logicalClock.tick();
+                log("LOCAL", "Allocated available port " + ports[i] + " -> RESERVED");
 
-                log("Port "
-                        + ports[i]
-                        + " successfully RESERVED.");
-
-                return ports[i];
+                long sendL = logicalClock.sendEvent();
+                log("SEND", "Returning allocated port " + ports[i] + " (Lamport: " + sendL + ")");
+                return new LamportResult<>(ports[i], sendL);
             }
         }
 
-        log("No available ports.");
+        logicalClock.tick();
+        log("LOCAL", "No available charging ports found.");
 
-        return "NONE";
+        long sendL = logicalClock.sendEvent();
+        log("SEND", "Returning NONE (Lamport: " + sendL + ")");
+
+        return new LamportResult<>("NONE", sendL);
     }
 
     // =========================================================
     // START CHARGING
     // =========================================================
 
-    public synchronized String startPortCharging(
-            String portId)
-            throws RemoteException
-    {
-        log("START CHARGING request: "
-                + portId);
+    @Override
+    public String startPortCharging(String portId) throws RemoteException {
+        return startPortCharging(portId, 0).getData();
+    }
+
+    @Override
+    public synchronized LamportResult<String> startPortCharging(String portId, long clientLamport) throws RemoteException {
+        long recvL = logicalClock.receiveEvent(clientLamport);
+        log("RECEIVE", "START PORT CHARGING request for " + portId + " received (Client Lamport: " + clientLamport + "). Clock updated to " + recvL);
 
         simulateProcessing(700);
 
         int i = indexOfPort(portId);
+        String result;
 
-        if (i == -1)
-        {
-            return "PORT_NOT_FOUND";
+        if (i == -1) {
+            result = "PORT_NOT_FOUND";
+        } else if (!portStatus[i].equals("RESERVED")) {
+            result = "PORT_NOT_RESERVED";
+        } else {
+            portStatus[i] = "CHARGING";
+            result = "CHARGING_STARTED";
+            logicalClock.tick();
+            log("LOCAL", "Port " + portId + " status changed to CHARGING.");
         }
 
-        if (!portStatus[i].equals("RESERVED"))
-        {
-            log("Port is not RESERVED.");
+        long sendL = logicalClock.sendEvent();
+        log("SEND", "Returning START PORT CHARGING response " + result + " (Lamport: " + sendL + ")");
 
-            return "PORT_NOT_RESERVED";
-        }
-
-        log("Changing "
-                + portId
-                + " to CHARGING...");
-
-        simulateProcessing(500);
-
-        portStatus[i] = "CHARGING";
-
-        log("Port "
-                + portId
-                + " is now CHARGING.");
-
-        return "CHARGING_STARTED";
+        return new LamportResult<>(result, sendL);
     }
 
     // =========================================================
     // MAIN
     // =========================================================
 
-    public static void main(String[] args)
-    {
-        try
-        {
+    public static void main(String[] args) {
+        try {
             String rmiHost = System.getenv("RMI_SERVER_HOST");
-            if (rmiHost != null && !rmiHost.trim().isEmpty())
-            {
+            if (rmiHost != null && !rmiHost.trim().isEmpty()) {
                 System.setProperty("java.rmi.server.hostname", rmiHost);
             }
 
-            final String HOST =
-                    "rmi://localhost:1234//ChargingStationServer";
+            final String HOST = "rmi://localhost:1234//ChargingStationServer";
 
             LocateRegistry.createRegistry(1234);
 
-            ChargingStationServer server =
-                    new ChargingStationServer();
+            ChargingStationServer server = new ChargingStationServer();
 
             Naming.bind(HOST, server);
 
-            System.out.println(
-                    "Charging Station Server is running..."
-            );
+            System.out.println("Charging Station Server is running...");
+            System.out.println("Station: EV-STATION-01");
+            System.out.println("RMI Registry running on port 1234.");
 
-            System.out.println(
-                    "Station: EV-STATION-01"
-            );
+            try {
+                server.synchronizeClock();
+            } catch (Exception syncEx) {
+                System.out.println("Startup clock synchronization warning: " + syncEx.getMessage());
+            }
 
-            System.out.println(
-                    "RMI Registry running on port 1234."
-            );
-
-            System.out.println(
-                    "Waiting for client requests..."
-            );
-        }
-        catch (Exception e)
-        {
-            System.out.println(
-                    "Server Exception: " + e
-            );
+            System.out.println("Waiting for client requests...");
+        } catch (Exception e) {
+            System.out.println("Server Exception: " + e);
         }
     }
 }

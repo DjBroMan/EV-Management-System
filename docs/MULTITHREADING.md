@@ -1,72 +1,59 @@
-# EV Charging Network Management System — Multithreading & Synchronization Guide
+# Multithreading & Concurrency Model
 
-## Java RMI Concurrent Request Processing Model
-
-In Java RMI, remote objects managed by `UnicastRemoteObject` execute client requests using a thread pool managed by the RMI runtime framework.
-
-- Each incoming remote method call from an RMI client is assigned to an **RMI Server Thread** from the RMI runtime pool.
-- Multiple clients (or multiple threads from `MultithreadTest`) calling the same RMI server execute **concurrently** on separate RMI server threads.
+This document describes the concurrency model, thread-safety mechanisms, and thread logging format of the system.
 
 ---
 
-## Double-Booking Prevention & Shared State Synchronization
+## 🧵 Thread Model Overview
 
-The primary shared mutable state in this distributed system is the **charging port availability array** (`portStatus[]`) managed by `ChargingStationServer`.
-
-### 1. `ChargingStationServer` Synchronization
-- Methods such as `reserveAnyAvailablePort()`, `startPortCharging()`, `releasePort()`, `reservePort()`, and `checkPortAvailability()` are declared `synchronized`.
-- When multiple RMI threads call `ChargingStationServer.reserveAnyAvailablePort()` simultaneously via `ReservationServer`:
-  1. Thread A acquires the monitor lock of `ChargingStationServer`.
-  2. Thread A scans ports (`P1`–`P4`), finds `P1` `AVAILABLE`, changes `P1` to `RESERVED`, and releases the lock.
-  3. Thread B then acquires the lock, scans ports, sees `P1` is `RESERVED`, and reserves `P2`.
-  4. **Guaranteed Outcome**: Two concurrent EVs will **NEVER** be allocated the same charging port.
-
-### 2. Fine-Grained Synchronization in Middle-Tier Servers
-To avoid performance bottlenecks during long simulated delays (`simulateProcessing(400-700ms)`), coarse method-level `synchronized` declarations were removed from `ReservationServer`, `ChargingSessionServer`, `PricingServer`, and `PaymentServer`.
-
-Instead, **fine-grained `synchronized(this)` blocks** are used exclusively around shared data operations:
-- Sequential counter increments (`reservationCounter++`, `sessionCounter++`, `paymentCounter++`).
-- Thread-unsafe `HashMap` read/write operations (`reservations`, `reservationPorts`, `sessionStatus`, `energyConsumed`, `sessionPort`, `paymentStatus`, `paymentDetails`).
-
-This design allows RMI threads to perform sleep delays and inter-server RMI network round-trips **concurrently** without locking out other remote callers.
+```
+MultithreadTest (10 EV Client Threads)
+       |
+       |  (Concurrent RMI Invocations)
+       v
+RMI Server Thread Pool (RMI TCP Connections)
+       |
+       |-- ChargingStationServer (Synchronized Port Map)
+       |-- ReservationServer (Concurrent requests + Synchronized Map Writes)
+       |-- ChargingSessionServer (Concurrent requests + Synchronized Session Writes)
+       |-- PricingServer (Stateless calculation)
+       +-- PaymentServer (Concurrent requests + Synchronized Payment Writes)
+```
 
 ---
 
-## MultithreadTest Architecture & Execution
+## 🔒 Thread Safety & Atomic Clock Updates
 
-`MultithreadTest.java` is a dedicated stress client designed to simulate high concurrency:
+1. **`LogicalClock` Thread Safety**:
+   - Implemented using `java.util.concurrent.atomic.AtomicLong`.
+   - `receiveEvent(long timestamp)` uses a lock-free compare-and-set atomic update loop:
+     ```java
+     while (true) {
+         long current = clock.get();
+         long updated = Math.max(current, receivedTimestamp) + 1;
+         if (clock.compareAndSet(current, updated)) return updated;
+     }
+     ```
+   - Prevents race conditions when multiple RMI TCP connection threads update the server's Lamport clock simultaneously.
+
+2. **`PhysicalClock` Thread Safety**:
+   - Offset stored as `private static volatile long clockOffsetMs`.
+   - Read/write access to offset is volatile-guaranteed across worker threads.
+
+3. **Charging Port Synchronization**:
+   - `ChargingStationServer.reserveAnyAvailablePort()` remains `synchronized` to prevent double-booking.
+   - `ReservationServer.reserveSlot()` allows concurrent thread entry while delegating port state protection to `ChargingStationServer`.
+
+---
+
+## 📊 Terminal Thread Logging Format
+
+Server logs explicitly format thread information alongside physical and Lamport timestamps:
 
 ```
-                          MultithreadTest (Main)
-                                     │
-                 ┌───────────────────┴───────────────────┐
-                 │  ExecutorService (Fixed 10 Threads)   │
-                 └───────────────────┬───────────────────┘
-                                     │
-                     CountDownLatch (startSignal.await())
-                                     │
-                     [Release all 10 EV Threads simultaneously]
-                                     │
-          ┌──────────┬──────────┬────┴─────┬──────────┬──────────┐
-          ▼          ▼          ▼          ▼          ▼          ▼
-        EV-1       EV-2       EV-3       EV-4       EV-5 ...   EV-10
-        Thread     Thread     Thread     Thread     Thread     Thread
-          │          │          │          │          │          │
-          └──────────┴──────────┼──────────┴──────────┴──────────┘
-                                ▼
-                       RMI Servers (1234–1238)
+[Physical=2026-08-26 15:30:05.123]
+[Lamport=17]
+[Server=ReservationServer]
+[Thread=23 | RMI TCP Connection(5)]
+Reservation request received from USER-1
 ```
-
-### Execution Mechanics
-1. **Thread Pool Creation**: `Executors.newFixedThreadPool(10)` creates 10 worker client threads.
-2. **Dynamic RMI Lookups**: Each EV thread independently performs `Naming.lookup(...)` calls for all 5 remote services.
-3. **Start Signal Barrier (`CountDownLatch startSignal = new CountDownLatch(1)`)**:
-   - All 10 EV threads call `startSignal.await()`.
-   - The main thread sleeps 2000ms to allow all threads to prepare, then calls `startSignal.countDown()`.
-   - All 10 threads start sending remote RMI requests simultaneously.
-4. **Graceful Capacity Handling**:
-   - The station has 4 ports (`P1`–`P4`).
-   - Threads 1–4 successfully reserve ports `P1`–`P4`.
-   - Threads 5–10 receive `"NONE"` / `"No charging ports available"` from `reserveSlot()`, log port unavailability, and terminate their workflow gracefully without throwing unhandled exceptions.
-5. **Completion Barrier (`CountDownLatch completionSignal = new CountDownLatch(10)`)**:
-   - The main thread waits for `completionSignal.await()` before reporting total execution time and test results.

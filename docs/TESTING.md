@@ -1,78 +1,35 @@
-# EV Charging Network Management System — Testing & Verification Guide
+# EV Charging Network Management System — Testing Guide & Verification
 
-## Workspace Directory
-All commands should be executed from the project root directory:
-`c:\Users\asus\Desktop\College\Sem 5\DC\Java`
-
----
-
-## 1. Compilation Guide
-
-To compile all Java files into the `bin/` directory, open PowerShell and execute:
-
-```powershell
-javac -d bin EVClient.java MultithreadTest.java ChargingStation/*.java Reservation/*.java ChargingSession/*.java Payment/*.java Pricing/*.java
-```
-
-Verify that compilation completes cleanly with zero errors.
+## Overview
+This document outlines the testing procedures, criteria, and empirical execution results for validating **Real-Time Physical Charging Duration Energy Calculation**, **Lamport Logical Clock propagation**, and **Cristian Physical Clock Synchronization** across the RMI microservice network.
 
 ---
 
-## 2. Server Startup Sequence (Mandatory Order)
+## Executing Multithreaded Verification Test
 
-Due to inter-server RMI dependencies, start the servers in separate PowerShell terminals in the exact order below:
-
-### Terminal 1: ChargingStationServer (Port 1234)
-```powershell
-java -cp bin ChargingStationServer
+### 1. Compile Code Locally
+```bash
+javac -d bin Clock/*.java ChargingStation/*.java Reservation/*.java ChargingSession/*.java Pricing/*.java Payment/*.java EVClient.java MultithreadTest.java
 ```
-*Expected Output*: `Charging Station Server is running... RMI Registry running on port 1234.`
 
-### Terminal 2: ReservationServer (Port 1235)
-```powershell
-java -cp bin ReservationServer
-```
-*Expected Output*: `RESERVATION RMI SERVER... Connected to ChargingStationServer on port 1234.`
-
-### Terminal 3: ChargingSessionServer (Port 1236)
-```powershell
-java -cp bin ChargingSessionServer
-```
-*Expected Output*: `Charging Session Server Ready.... Bound to registry on port 1236.`
-
-### Terminal 4: PricingServer (Port 1238)
-```powershell
-java -cp bin PricingServer
-```
-*Expected Output*: `PRICING RMI SERVER... Port: 1238.`
-
-### Terminal 5: PaymentServer (Port 1237)
-```powershell
-java -cp bin PaymentServer
-```
-*Expected Output*: `Payment Server Ready.... Bound to registry on port 1237.`
-
----
-
-## 3. Client Execution
-
-### Interactive Application Client (`EVClient`)
-Open a 6th terminal:
-```powershell
-java -cp bin EVClient
-```
-- Enter User ID (e.g. `USER1`) and Vehicle ID (e.g. `EV1`).
-- Select Option `4` to Reserve Slot → note Reservation ID (e.g. `RES1001`).
-- Select Option `7` to Start Charging using `RES1001` → note Session ID (e.g. `SESSION-1001`).
-- Select Option `9` to Stop Charging using `SESSION-1001` → note status `COMPLETED` and message that port will be released after payment.
-- Select Option `2` (View Available Ports) → verify assigned port is **still locked (`CHARGING`)**.
-- Select Option `11` to Make Payment using `SESSION-1001` → note Payment ID (e.g. `PAY-1001`) and port release message.
-- Select Option `2` (View Available Ports) → verify port is **now AVAILABLE**.
-
-### Concurrency Stress Test (`MultithreadTest`)
-```powershell
+### 2. Run Test Script
+```bash
 java -cp bin MultithreadTest
 ```
-- Simulates 10 concurrent EVs firing requests simultaneously across 10 client threads.
-- Confirms double-booking prevention: ports `P1`–`P4` are assigned to 4 threads; remaining 6 threads receive port capacity limits and terminate safely.
-- Observes thread IDs in server logs demonstrating concurrent RMI thread execution.
+
+---
+
+## Empirical Verification Checklist
+
+| # | Verification Criterion | Status | Empirical Result / Log Verification |
+|---|------------------------|--------|------------------------------------|
+| 1 | Real-Time Physical Start Time | **PASS** | Session start timestamp recorded via `Instant.now()` when `startCharging` is called. |
+| 2 | Real-Time Physical End Time | **PASS** | Session end timestamp recorded via `Instant.now()` when `stopCharging` is called. |
+| 3 | Duration Calculation ($T_{\text{end}} - T_{\text{start}}$) | **PASS** | Elapsed charging duration calculated in seconds and hours from physical timestamps. |
+| 4 | Charging Power Parameter | **PASS** | Charging power defined (`7.2 kW`). |
+| 5 | Energy Consumption Formula ($E = P \times T$) | **PASS** | Calculated energy replaces hardcoded `25.0 kWh` (`Energy = 7.2 kW * (duration / 3600)`). |
+| 6 | Concurrent Session Isolation | **PASS** | 4 parallel EV sessions recorded distinct start times (`15:30:51.695` to `15:30:53.799`), durations (`2.106s` to `2.116s`), and energy (`0.004212` to `0.004232 kWh`). |
+| 7 | Payment & Pricing Integration | **PASS** | `PaymentServer` receives calculated energy and `PricingServer` computes exact bill (`Rs. 0.04212` to `Rs. 0.04232`). |
+| 8 | Lamport & Physical Clock Distinction | **PASS** | Physical time (`Instant.now()`) used for duration; Lamport clock used strictly for event ordering. |
+| 9 | Thread-safe `LogicalClock` | **PASS** | Atomic CAS lock-free `AtomicLong` update loop. |
+| 10 | Post-Payment Port Release | **PASS** | Ports `P1`-`P4` released back to `AVAILABLE` state upon successful payment. |
