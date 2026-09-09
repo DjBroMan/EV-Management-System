@@ -1,13 +1,14 @@
 # EV Charging Network Management System — State Management & Transitions
 
 ## Overview
-State management in this system covers six distinct entities:
+State management in this system covers seven distinct entities:
 1. **Charging Port State** (managed by `ChargingStationServer`)
-2. **Reservation State** (managed by `ReservationServer`)
-3. **Charging Session State** (managed by `ChargingSessionServer`)
-4. **Payment State** (managed by `PaymentServer`)
-5. **Lamport Logical Clock State** (maintained independently per server via `LogicalClock`)
-6. **Cristian Physical Clock Offset State** (maintained via `PhysicalClock`)
+2. **Reservation State** (managed by `ReservationServer` PRIMARY and replicated to SECONDARY)
+3. **Replication State Machine** (managed by `ReservationServerManager`)
+4. **Charging Session State** (managed by `ChargingSessionServer`)
+5. **Payment State** (managed by `PaymentServer`)
+6. **Lamport Logical Clock State** (maintained independently per server via `LogicalClock`)
+7. **Cristian Physical Clock Offset State** (maintained via `PhysicalClock`)
 
 ---
 
@@ -27,26 +28,38 @@ State management in this system covers six distinct entities:
 
 ---
 
-## 2. Reservation State Machine
+## 2. Reservation State Machine (Replicated)
 
 ```
-   REQUESTED  ────────►  CONFIRMED  ────────►  USED / COMPLETED
-                        (reserveSlot)           (startCharging)
-                             │
-                             ▼
-                         CANCELLED
-                    (cancelReservation)
+   REQUESTED  ────────►  CONFIRMED (Primary + Secondary)  ────────►  USED / COMPLETED
+                              (reserveSlot)                             (startCharging)
+                                   │
+                                   ▼
+                       CANCELLED (Primary + Secondary)
+                             (cancelReservation)
 ```
 
-| Current State | Target State | Trigger Method | Controlling Server | Description |
-|---------------|--------------|----------------|--------------------|-------------|
-| `REQUESTED` | `CONFIRMED` | `reserveSlot(userId, vehicleId)` | `ReservationServer` | Valid user and available port confirmed; reservation record created. |
+| Current State | Target State | Trigger Method | Controlling Server | Replication Behavior |
+|---------------|--------------|----------------|--------------------|----------------------|
+| `REQUESTED` | `CONFIRMED` | `reserveSlot(userId, vehicleId)` | `ReservationServer` (PRIMARY) | Primary allocates port, saves local state, and invokes Manager $\rightarrow$ Secondary to replicate `RES1001 -> portId`. |
 | `CONFIRMED` | `USED` / `COMPLETED` | `startCharging(reservationId)` | `ChargingSessionServer` | Reservation validated and consumed to launch charging session. |
-| `CONFIRMED` | `CANCELLED` | `cancelReservation(reservationId)` | `ReservationServer` | User cancels reservation; allocated port released back to `AVAILABLE`. |
+| `CONFIRMED` | `CANCELLED` | `cancelReservation(reservationId)` | `ReservationServer` (PRIMARY) | Primary releases port, removes local state, and invokes Manager $\rightarrow$ Secondary to replicate removal. |
 
 ---
 
-## 3. Charging Session State Machine
+## 3. Replication Node State Machine
+
+```
+   SECONDARY (Passive Replica) ────────► PRIMARY (Active Node)
+                               (promoteToPrimary)
+```
+
+- **`SECONDARY`**: Rejects direct client write requests; accepts replication and synchronization updates.
+- **`PRIMARY`**: Directly handles client requests, performs physical port allocation via `ChargingStationServer`, and synchronizes state to replicas via `ReservationServerManager`.
+
+---
+
+## 4. Charging Session State Machine
 
 ```
    CHARGING  ───────────────────────────────►  COMPLETED
@@ -56,11 +69,11 @@ State management in this system covers six distinct entities:
 
 | Current State | Target State | Trigger Method | Controlling Server | Description |
 |---------------|--------------|----------------|--------------------|-------------|
-| `CHARGING` | `COMPLETED` | `stopCharging(sessionId)` | `ChargingSessionServer` | Session marked COMPLETED, energy consumed recorded (`25.0 kWh`). Port is **NOT** released. |
+| `CHARGING` | `COMPLETED` | `stopCharging(sessionId)` | `ChargingSessionServer` | Session marked COMPLETED, energy consumed calculated from real physical duration. Port is **NOT** released. |
 
 ---
 
-## 4. Payment State Machine
+## 5. Payment State Machine
 
 ```
    PENDING  ────────────────────────────────►  SUCCESS
@@ -74,7 +87,7 @@ State management in this system covers six distinct entities:
 
 ---
 
-## 5. Lamport Logical Clock & Physical Clock Offset State
+## 6. Lamport Logical Clock & Physical Clock Offset State
 
 | Clock Entity | State Variable | Update Mechanism | Synchronization Guarantee |
 |--------------|----------------|------------------|---------------------------|

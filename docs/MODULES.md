@@ -13,11 +13,18 @@
 ### 2. `ChargingStation/` Package
 - `ChargingStationInterface.java` & `ChargingStationServer.java` (Registry Port `1234`, Export Port `2234`): Manages physical ports (`P1`-`P4`).
 
-### 3. `Reservation/` Package
-- `ReservationInterface.java` & `ReservationServer.java` (Registry Port `1235`, Export Port `2235`): Slot reservation management.
+### 3. `Reservation/` Package (Primary-Backup Replicated)
+- `ReservationInterface.java`: Client-facing RMI interface for slot reservation, cancellation, and queries.
+- `ReservationReplicationInterface.java`: Inter-node replication interface for manager-to-replica state synchronization and promotion.
+- `ReservationManagerInterface.java`: Remote interface exposed by `ReservationServerManager`.
+- `ReservationStateSnapshot.java`: Serializable DTO carrying complete in-memory reservation state.
+- `ReservationServer.java`: Dual-role implementation running as:
+  - **PRIMARY** (Registry Port `1235`, Export Port `2235`): Serves client requests and drives replication.
+  - **SECONDARY** (Registry Port `1245`, Export Port `2245`): Passive backup replica awaiting promotion.
+- `ReservationServerManager.java` (Registry Port `1240`, Export Port `2240`): Central replication coordinator and failover manager.
 
 ### 4. `ChargingSession/` Package
-- `ChargingSessionInterface.java` & `ChargingSessionServer.java` (Registry Port `1236`, Export Port `2236`): Session tracking.
+- `ChargingSessionInterface.java` & `ChargingSessionServer.java` (Registry Port `1236`, Export Port `2236`): Session tracking, physical duration measurement, and energy calculation ($E = P \times T$).
 
 ### 5. `Pricing/` Package
 - `PricingInterface.java` & `PricingServer.java` (Registry Port `1238`, Export Port `2238`): Dynamic bill calculation.
@@ -25,6 +32,7 @@
 ### 6. `Payment/` Package
 - `PaymentInterface.java` & `PaymentServer.java` (Registry Port `1237`, Export Port `2237`): Settlement and post-payment port release.
 
-### 7. Client Applications
+### 7. Client & Test Applications
 - `EVClient.java`: Interactive CLI client.
 - `MultithreadTest.java`: Concurrent multithreaded test suite (10 EV threads).
+- `ReplicationTest.java`: Automated test suite for primary-backup replication, state synchronization, and failover promotion.

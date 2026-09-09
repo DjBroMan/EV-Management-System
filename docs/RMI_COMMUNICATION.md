@@ -1,7 +1,7 @@
 # EV Charging Network Management System — RMI Communication Architecture
 
 ## Overview
-Communication between client applications and microservice servers—as well as inter-server microservice communication—is performed exclusively using **Java Remote Method Invocation (Java RMI)**.
+Communication between client applications and microservice servers—as well as inter-server microservice communication and primary-backup state replication—is performed exclusively using **Java Remote Method Invocation (Java RMI)**.
 
 Each microservice exports its remote objects on specific RMI registry and remote ports, and methods accept a `long clientLamport` parameter and return a `LamportResult<T>` serializable wrapper object containing both the operational result and the updated server Lamport timestamp.
 
@@ -13,14 +13,16 @@ Each microservice exports its remote objects on specific RMI registry and remote
 |--------------|------------------|---------------|---------------------------|------------------------|
 | `TimeServer` | `TimeServer` | `1239` | `2239` | `TimeServerInterface` |
 | `ChargingStationServer` | `ChargingStationServer` | `1234` | `2234` | `ChargingStationInterface` |
-| `ReservationServer` | `ReservationService` | `1235` | `2235` | `ReservationInterface` |
+| `ReservationServer (PRIMARY)` | `ReservationService`, `ReservationReplicationService` | `1235` | `2235` | `ReservationInterface`, `ReservationReplicationInterface` |
+| `ReservationServer (SECONDARY)` | `ReservationService`, `ReservationReplicationService` | `1245` | `2245` | `ReservationInterface`, `ReservationReplicationInterface` |
+| `ReservationServerManager` | `ReservationManager` | `1240` | `2240` | `ReservationManagerInterface` |
 | `ChargingSessionServer` | `ChargingSessionServer` | `1236` | `2236` | `ChargingSessionInterface` |
 | `PaymentServer` | `PaymentServer` | `1237` | `2237` | `PaymentInterface` |
 | `PricingServer` | `PricingService` | `1238` | `2238` | `PricingInterface` |
 
 ---
 
-## Inter-Service RMI Dependencies & Lamport Timestamp Propagation
+## Inter-Service RMI Dependencies & Replication
 
 ```
 +------------------+
@@ -31,12 +33,23 @@ Each microservice exports its remote objects on specific RMI registry and remote
          | RMI request + clientLamport (LamportResult response returned)
          v
 +------------------+     RMI + sendL     +-----------------------+
-|ReservationServer +-------------------->+ ChargingStationServer |
+|ReservationPrimary+-------------------->+ ChargingStationServer |
 +--------+---------+                     +-----------^-----------+
          |                                           |
-         | RMI + sendL                               | RMI + sendL (post-payment release)
+         | RMI + sendL (replicateReservation)        | RMI + sendL (post-payment release)
          v                                           |
 +------------------+                                 |
+|ReservationManager|                                 |
++--------+---------+                                 |
+         |                                           |
+         | RMI + sendL (applyReservationUpdate)      |
+         v                                           |
++------------------+                                 |
+|ReservationSecond |                                 |
++------------------+                                 |
+         |                                           |
+         |                                           |
++--------v---------+     RMI + sendL                 |
 |ChargingSessionSrv+---------------------------------+
 +--------+---------+
          |
@@ -63,7 +76,7 @@ Each microservice exports its remote objects on specific RMI registry and remote
    `clock.tick();` ($L = L + 1$)
    Server updates internal state, logs `[Event=LOCAL]` tag.
 
-4. **Server Inter-Service RMI Call**:
+4. **Server Inter-Service RMI Call (Primary -> Manager -> Secondary)**:
    `long interSendL = clock.sendEvent();`
    Server logs `[Event=SEND]` tag and invokes downstream RMI server.
 

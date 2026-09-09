@@ -30,11 +30,13 @@ In a Distributed Computing environment, software modules are deployed as indepen
 ---
 
 ## Docker Services Overview
-The system configures **6 microservices** in [`docker-compose.yml`](file:///c:/Users/asus/Desktop/College/Sem%205/DC/Java/docker-compose.yml):
+The system configures **8 microservices** in [`docker-compose.yml`](file:///c:/Users/asus/Desktop/College/Sem%205/DC/Java/docker-compose.yml):
 
 - **`time-server`**: Dedicated RMI reference physical time server (`Clock.TimeServer`).
 - **`charging-station`**: Manages physical charging ports `P1`-`P4` (`ChargingStationServer`).
-- **`reservation`**: Slot booking management service (`ReservationServer`).
+- **`reservation-primary`**: Active primary slot booking management service on port 1235 (`ReservationServer primary 1235`).
+- **`reservation-secondary`**: Passive backup replica slot booking service on port 1245 (`ReservationServer secondary 1245`).
+- **`reservation-manager`**: Replication coordinator and failover manager on port 1240 (`ReservationServerManager`).
 - **`charging-session`**: Session tracking, physical start/end time recording, and real-time energy calculation ($E = P \times T$) (`ChargingSessionServer`).
 - **`pricing`**: Dynamic bill calculation based on station demand multipliers (`PricingServer`).
 - **`payment`**: Payment settlement and post-payment port release (`PaymentServer`).

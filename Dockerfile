@@ -8,6 +8,6 @@ RUN apt-get update && \
 
 COPY . /app
 
-RUN mkdir -p /app/bin && javac -d /app/bin Clock/*.java ChargingStation/*.java Reservation/*.java ChargingSession/*.java Pricing/*.java Payment/*.java EVClient.java MultithreadTest.java
+RUN mkdir -p /app/bin && javac -d /app/bin Clock/*.java ChargingStation/*.java Reservation/*.java ChargingSession/*.java Pricing/*.java Payment/*.java EVClient.java MultithreadTest.java ReplicationTest.java
 
 ENV CLASSPATH=/app/bin

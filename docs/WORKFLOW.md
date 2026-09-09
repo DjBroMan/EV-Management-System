@@ -5,17 +5,21 @@
 The business workflow consists of 6 sequential steps, with Lamport logical timestamps propagating across every stage and physical time tracking charging duration:
 
 ```
-[1. RESERVE SLOT] ---> [2. START CHARGING] ---> [3. STOP CHARGING] ---> [4. GET ENERGY & PRICING] ---> [5. MAKE PAYMENT] ---> [6. PORT RELEASE]
+[1. RESERVE & REPLICATE] ---> [2. START CHARGING] ---> [3. STOP CHARGING] ---> [4. GET ENERGY & PRICING] ---> [5. MAKE PAYMENT] ---> [6. PORT RELEASE]
 ```
 
 ### Step-by-Step Event Lifecycle & Energy Calculation
 
-1. **Reserve Slot**:
+1. **Reserve Slot & Replicate State**:
    - Client sends `reserveSlot(userId, vehicleId, clientLamport)` with Lamport $L_{\text{client\_send1}}$.
-   - `ReservationServer` receives call, updates $L = \max(L_{\text{server}}, L_{\text{client\_send1}}) + 1$, logs `[Event=RECEIVE]`.
+   - `ReservationServer` (PRIMARY) receives call, updates $L = \max(L_{\text{server}}, L_{\text{client\_send1}}) + 1$, logs `[Event=RECEIVE]`.
    - `ReservationServer` calls `ChargingStationServer.reserveAnyAvailablePort(sendL)`.
    - `ChargingStationServer` allocates port `P1` $\rightarrow$ `RESERVED`, logs `[Event=LOCAL]`, returns `LamportResult("P1", stationL)`.
-   - `ReservationServer` receives response, stores reservation `RES1001`, returns `LamportResult(details, resL)` to client.
+   - `ReservationServer` updates local in-memory state: `RES1001 -> P1`.
+   - `ReservationServer` calls `ReservationServerManager.replicateReservation(...)`.
+   - `ReservationServerManager` forwards state update to `ReservationServer` (SECONDARY).
+   - `ReservationServer` (SECONDARY) stores `RES1001 -> P1` and increments counter.
+   - Primary receives acknowledgment and returns `LamportResult(details, resL)` to client.
 
 2. **Start Charging**:
    - Client sends `startCharging(reservationId, clientLamport)`.
