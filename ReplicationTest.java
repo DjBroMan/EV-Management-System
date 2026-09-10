@@ -43,6 +43,9 @@ public class ReplicationTest {
     private static final String MANAGER_URL =
             "rmi://" + getEnvHost("MANAGER_HOST", "localhost") + ":1240/ReservationManager";
 
+    private static final String MANAGER_SERVICE_URL =
+            "rmi://" + getEnvHost("MANAGER_HOST", "localhost") + ":1240/ReservationService";
+
     public static void main(String[] args) {
         // Redirect Docker container hostnames to localhost when run from host machine
         try {
@@ -67,7 +70,7 @@ public class ReplicationTest {
         System.out.println("==================================================================================");
         System.out.println("   PRIMARY-BACKUP STATE REPLICATION — DETAILED STEP-BY-STEP VERIFICATION SUITE");
         System.out.println("==================================================================================");
-        System.out.println("Architecture: Primary (:1235) -> ReservationServerManager (:1240) -> Secondary (:1245)");
+        System.out.println("Architecture: EVClient -> Manager (:1240) -> Primary (:1235) / Secondary (:1245)");
         System.out.println("Physical Reference Clock: java.time.Instant");
         System.out.println("Logical Event Ordering: Lamport Logical Clocks (CAS Lock-Free AtomicLong)");
         System.out.println("==================================================================================");
@@ -80,6 +83,7 @@ public class ReplicationTest {
         ReservationReplicationInterface primaryRepl = null;
         ReservationReplicationInterface secondaryRepl = null;
         ReservationManagerInterface managerClient = null;
+        ReservationInterface managerProxyClient = null;
 
         // Try looking up already running services (e.g. from Docker)
         try {
@@ -88,6 +92,7 @@ public class ReplicationTest {
             primaryRepl = (ReservationReplicationInterface) Naming.lookup(PRIMARY_REPL_URL);
             secondaryRepl = (ReservationReplicationInterface) Naming.lookup(SECONDARY_REPL_URL);
             managerClient = (ReservationManagerInterface) Naming.lookup(MANAGER_URL);
+            managerProxyClient = (ReservationInterface) Naming.lookup(MANAGER_SERVICE_URL);
             System.out.println("\n[SETUP] Successfully connected to live RMI services on network/Docker.");
         } catch (Exception notRunning) {
             // Standalone mode: Start in-process services with dynamic/available export ports
@@ -112,6 +117,7 @@ public class ReplicationTest {
 
                 ReservationServerManager localManager = new ReservationServerManager(PRIMARY_REPL_URL, SECONDARY_REPL_URL, 1240, 0);
                 Naming.rebind(MANAGER_URL, localManager);
+                Naming.rebind(MANAGER_SERVICE_URL, localManager);
 
                 localPrimary.setManager(localManager);
 
@@ -119,6 +125,7 @@ public class ReplicationTest {
                 primaryRepl = (ReservationReplicationInterface) Naming.lookup(PRIMARY_REPL_URL);
                 secondaryRepl = (ReservationReplicationInterface) Naming.lookup(SECONDARY_REPL_URL);
                 managerClient = (ReservationManagerInterface) Naming.lookup(MANAGER_URL);
+                managerProxyClient = (ReservationInterface) Naming.lookup(MANAGER_SERVICE_URL);
                 System.out.println("[SETUP] Local in-process RMI cluster initialized successfully.");
             } catch (Exception e) {
                 System.out.println("[ERROR] Failed to start local servers: " + e.getMessage());
@@ -174,18 +181,18 @@ public class ReplicationTest {
             }
 
             // =========================================================================
-            // TEST 2: SINGLE RESERVATION REPLICATION (PRIMARY -> MANAGER -> SECONDARY)
+            // TEST 2: SINGLE RESERVATION REPLICATION (EVCLIENT -> MANAGER -> PRIMARY -> SECONDARY)
             // =========================================================================
             System.out.println("\n==================================================================================");
-            System.out.println("TEST 2: Single Reservation Synchronous State Replication");
+            System.out.println("TEST 2: Single Reservation Synchronous State Replication via Manager Proxy");
             System.out.println("==================================================================================");
-            System.out.println("[Step 2.1] Client sends reserveSlot(userId='USER-1', vehicleId='EV-1') to PRIMARY (1235)...");
+            System.out.println("[Step 2.1] Client sends reserveSlot(userId='USER-1', vehicleId='EV-1') to MANAGER (:1240)...");
             long t2Send = clientClock.sendEvent();
-            System.out.println("           [Client -> Primary] [Lamport=" + t2Send + "] Dispatching reservation request...");
+            System.out.println("           [Client -> Manager] [Lamport=" + t2Send + "] Dispatching reservation request...");
             
-            LamportResult<String> r1 = primaryClient.reserveSlot("USER-1", "EV-1", t2Send);
+            LamportResult<String> r1 = managerProxyClient.reserveSlot("USER-1", "EV-1", t2Send);
             clientClock.receiveEvent(r1.getTimestamp());
-            System.out.println("           [Primary -> Client] [Lamport=" + clientClock.getValue() + "] Confirmed Reservation Response:\n" + indent(r1.getData()));
+            System.out.println("           [Manager -> Client] [Lamport=" + clientClock.getValue() + "] Confirmed Reservation Response:\n" + indent(r1.getData()));
 
             String resId1 = extractField(r1.getData(), "Reservation ID:");
             String port1 = extractField(r1.getData(), "Port:");
@@ -213,7 +220,7 @@ public class ReplicationTest {
                 System.out.println("           - Reservation " + resId1 + " mirrored to Secondary: MATCH");
                 System.out.println("           - Port assignment (" + port1 + ") mirrored to Secondary: MATCH");
                 System.out.println("           - Reservation counter (" + priSnap1.getData().getReservationCounter() + ") synchronized: MATCH");
-                System.out.println("\n>>> [PASS] TEST 2: Single reservation successfully replicated from Primary -> Manager -> Secondary.");
+                System.out.println("\n>>> [PASS] TEST 2: Single reservation successfully routed via Manager and replicated to Secondary.");
                 passed++;
             } else {
                 System.out.println("\n>>> [FAIL] TEST 2: Secondary replica state does not match Primary.");
@@ -223,17 +230,17 @@ public class ReplicationTest {
             // TEST 3: MULTIPLE SEQUENTIAL RESERVATIONS CONSISTENCY
             // =========================================================================
             System.out.println("\n==================================================================================");
-            System.out.println("TEST 3: Multiple Sequential Reservations State Consistency");
+            System.out.println("TEST 3: Multiple Sequential Reservations State Consistency via Manager Proxy");
             System.out.println("==================================================================================");
-            System.out.println("[Step 3.1] Creating Reservation #2 for USER-2 (EV-2)...");
-            LamportResult<String> r2 = primaryClient.reserveSlot("USER-2", "EV-2", clientClock.sendEvent());
+            System.out.println("[Step 3.1] Creating Reservation #2 for USER-2 (EV-2) via Manager (:1240)...");
+            LamportResult<String> r2 = managerProxyClient.reserveSlot("USER-2", "EV-2", clientClock.sendEvent());
             clientClock.receiveEvent(r2.getTimestamp());
             String resId2 = extractField(r2.getData(), "Reservation ID:");
             String port2 = extractField(r2.getData(), "Port:");
             System.out.println("           Created: " + resId2 + " -> Port " + port2 + " (Lamport=" + clientClock.getValue() + ")");
 
-            System.out.println("[Step 3.2] Creating Reservation #3 for USER-3 (EV-3)...");
-            LamportResult<String> r3 = primaryClient.reserveSlot("USER-3", "EV-3", clientClock.sendEvent());
+            System.out.println("[Step 3.2] Creating Reservation #3 for USER-3 (EV-3) via Manager (:1240)...");
+            LamportResult<String> r3 = managerProxyClient.reserveSlot("USER-3", "EV-3", clientClock.sendEvent());
             clientClock.receiveEvent(r3.getTimestamp());
             String resId3 = extractField(r3.getData(), "Reservation ID:");
             String port3 = extractField(r3.getData(), "Port:");
@@ -265,13 +272,13 @@ public class ReplicationTest {
             // TEST 4: CANCELLATION STATE REPLICATION
             // =========================================================================
             System.out.println("\n==================================================================================");
-            System.out.println("TEST 4: Cancellation State Replication & Physical Port Release");
+            System.out.println("TEST 4: Cancellation State Replication & Physical Port Release via Manager");
             System.out.println("==================================================================================");
-            System.out.println("[Step 4.1] Client sends cancelReservation(" + resId2 + ") to PRIMARY (:1235)...");
+            System.out.println("[Step 4.1] Client sends cancelReservation(" + resId2 + ") to MANAGER (:1240)...");
             long t4Send = clientClock.sendEvent();
-            LamportResult<String> cancelRes = primaryClient.cancelReservation(resId2, t4Send);
+            LamportResult<String> cancelRes = managerProxyClient.cancelReservation(resId2, t4Send);
             clientClock.receiveEvent(cancelRes.getTimestamp());
-            System.out.println("           [Primary Response] " + cancelRes.getData() + " (Lamport=" + clientClock.getValue() + ")");
+            System.out.println("           [Manager Response] " + cancelRes.getData() + " (Lamport=" + clientClock.getValue() + ")");
 
             System.out.println("\n[Step 4.2] Verifying removal on PRIMARY (:1235)...");
             LamportResult<ReservationStateSnapshot> priSnap4 = primaryRepl.getStateSnapshot(clientClock.sendEvent());
@@ -296,21 +303,21 @@ public class ReplicationTest {
             // TEST 5: MULTITHREADED CONCURRENT RESERVATION REPLICATION
             // =========================================================================
             System.out.println("\n==================================================================================");
-            System.out.println("TEST 5: Multithreaded Concurrent Reservation & Mutex Integrity");
+            System.out.println("TEST 5: Multithreaded Concurrent Reservation & Mutex Integrity via Manager Proxy");
             System.out.println("==================================================================================");
             int threads = 3;
-            System.out.println("[Step 5.1] Launching " + threads + " concurrent client threads sending parallel reservations to Primary...");
+            System.out.println("[Step 5.1] Launching " + threads + " concurrent client threads sending parallel reservations to Manager (:1240)...");
             ExecutorService executor = Executors.newFixedThreadPool(threads);
             CountDownLatch latch = new CountDownLatch(threads);
 
             for (int i = 10; i < 10 + threads; i++) {
                 final int idx = i;
-                final ReservationInterface pCli = primaryClient;
+                final ReservationInterface mCli = managerProxyClient;
                 executor.submit(() -> {
                     try {
                         LogicalClock thClock = new LogicalClock();
                         long thSend = thClock.sendEvent();
-                        LamportResult<String> res = pCli.reserveSlot("CONCURRENT-USER-" + idx, "CONCURRENT-EV-" + idx, thSend);
+                        LamportResult<String> res = mCli.reserveSlot("CONCURRENT-USER-" + idx, "CONCURRENT-EV-" + idx, thSend);
                         thClock.receiveEvent(res.getTimestamp());
                         System.out.println("           [Thread-" + Thread.currentThread().getId() + "] " + extractField(res.getData(), "Reservation ID:") + " allocated port " + extractField(res.getData(), "Port:"));
                     } catch (Exception e) {
@@ -367,67 +374,74 @@ public class ReplicationTest {
             }
 
             // =========================================================================
-            // TEST 7: FAILOVER PROMOTION TO PRIMARY
+            // TEST 7: FAILOVER PROMOTION TO PRIMARY VIA MANAGER
             // =========================================================================
             System.out.println("\n==================================================================================");
-            System.out.println("TEST 7: Failover Promotion of Secondary Node to PRIMARY");
+            System.out.println("TEST 7: Failover Promotion of Secondary Node to PRIMARY via Manager");
             System.out.println("==================================================================================");
-            System.out.println("[Step 7.1] Sending promoteToPrimary() signal to SECONDARY (:1245)...");
-            long t7Send = clientClock.sendEvent();
-            LamportResult<Boolean> promoRes = secondaryRepl.promoteToPrimary(t7Send);
-            clientClock.receiveEvent(promoRes.getTimestamp());
-            System.out.println("           Promotion command acknowledged: " + promoRes.getData() + " (Lamport=" + clientClock.getValue() + ")");
+            System.out.println("[Step 7.1] Simulating Primary node failure (setting role to SECONDARY / unbinding)...");
+            primaryRepl.resetState("SECONDARY", clientClock.sendEvent());
 
-            System.out.println("[Step 7.2] Querying role of node on port 1245...");
+            System.out.println("[Step 7.2] Invoking managerClient.checkAndFailover()...");
+            long t7Send = clientClock.sendEvent();
+            LamportResult<Boolean> promoRes = managerClient.checkAndFailover(t7Send);
+            clientClock.receiveEvent(promoRes.getTimestamp());
+            System.out.println("           Failover promotion acknowledged by Manager: " + promoRes.getData() + " (Lamport=" + clientClock.getValue() + ")");
+
+            System.out.println("[Step 7.3] Querying new role of Secondary node on port 1245...");
             LamportResult<String> newRoleRes = secondaryRepl.getRole(clientClock.sendEvent());
             clientClock.receiveEvent(newRoleRes.getTimestamp());
-            System.out.println("           Active Role: " + newRoleRes.getData());
+            System.out.println("           Active Role on Port 1245: " + newRoleRes.getData());
+
+            System.out.println("[Step 7.4] Inspecting Manager Router target after failover...");
+            LamportResult<String> routerStatus = managerClient.getReplicationStatus(clientClock.sendEvent());
+            clientClock.receiveEvent(routerStatus.getTimestamp());
+            System.out.println("           " + routerStatus.getData().replace("\n", "\n           "));
 
             if (promoRes.getData() && "PRIMARY".equals(newRoleRes.getData())) {
-                System.out.println("\n>>> [PASS] TEST 7: Secondary replica successfully promoted to active PRIMARY role.");
+                System.out.println("\n>>> [PASS] TEST 7: Secondary replica successfully promoted to active PRIMARY role and Manager updated routing.");
                 passed++;
             } else {
                 System.out.println("\n>>> [FAIL] TEST 7: Promotion failed.");
             }
 
             // =========================================================================
-            // TEST 8: CLIENT OPERATIONS ON PROMOTED PRIMARY
+            // TEST 8: TRANSPARENT CLIENT FAILOVER VIA MANAGER (SINGLE ENTRY POINT)
             // =========================================================================
             System.out.println("\n==================================================================================");
-            System.out.println("TEST 8: Execution of Read & Write Operations on Promoted Primary");
+            System.out.println("TEST 8: Transparent Client Operations via Manager After Failover");
             System.out.println("==================================================================================");
-            System.out.println("[Step 8.1] Connecting client to Promoted Primary (Port 1245)...");
-            ReservationInterface promotedPrimaryClient = (ReservationInterface) Naming.lookup(SECONDARY_SERVICE_URL);
+            System.out.println("[Step 8.1] EVClient STILL connects only to Manager on Port 1240 (NO URL change needed)...");
 
-            System.out.println("[Step 8.2] Reading pre-existing replicated reservation (" + resId1 + ")...");
+            System.out.println("[Step 8.2] Reading pre-existing replicated reservation (" + resId1 + ") through Manager (:1240)...");
             long t8Send1 = clientClock.sendEvent();
-            LamportResult<String> getRes = promotedPrimaryClient.getReservation(resId1, t8Send1);
+            LamportResult<String> getRes = managerProxyClient.getReservation(resId1, t8Send1);
             clientClock.receiveEvent(getRes.getTimestamp());
-            System.out.println("           Query Result:\n" + indent(getRes.getData()));
+            System.out.println("           Query Result via Manager:\n" + indent(getRes.getData()));
 
             // Release port on station so we are sure a port is free
             try {
                 if (station != null) station.releasePort("P1", clientClock.sendEvent());
             } catch (Exception ignored) {}
 
-            System.out.println("\n[Step 8.3] Executing NEW write reservation (USER-POST-FAILOVER) on Promoted Primary...");
+            System.out.println("\n[Step 8.3] Executing NEW write reservation (USER-POST-FAILOVER) through Manager (:1240)...");
             long t8Send2 = clientClock.sendEvent();
-            LamportResult<String> newRes = promotedPrimaryClient.reserveSlot("USER-POST-FAILOVER", "EV-POST-FAILOVER", t8Send2);
+            LamportResult<String> newRes = managerProxyClient.reserveSlot("USER-POST-FAILOVER", "EV-POST-FAILOVER", t8Send2);
             clientClock.receiveEvent(newRes.getTimestamp());
-            System.out.println("           Post-Failover Reservation Response:\n" + indent(newRes.getData()));
+            System.out.println("           Post-Failover Reservation Response via Manager:\n" + indent(newRes.getData()));
 
             String postFailoverResId = extractField(newRes.getData(), "Reservation ID:");
             boolean test8Success = (newRes.getData().contains("Reservation successful") || postFailoverResId != null) &&
                                    getRes.getData().contains("CONFIRMED");
 
             if (test8Success) {
-                System.out.println("           - Read operation verified: SUCCESS");
-                System.out.println("           - New reservation created: " + postFailoverResId);
-                System.out.println("           - Sequential counter uninterrupted: VERIFIED");
-                System.out.println("\n>>> [PASS] TEST 8: Promoted Primary handles client read/write operations seamlessly.");
+                System.out.println("           - Read operation routed to Promoted Secondary: SUCCESS");
+                System.out.println("           - New reservation created on Promoted Secondary: " + postFailoverResId);
+                System.out.println("           - EVClient remained connected strictly to :1240: VERIFIED");
+                System.out.println("\n>>> [PASS] TEST 8: Manager seamlessly routes client traffic to Promoted Primary.");
                 passed++;
             } else {
-                System.out.println("\n>>> [FAIL] TEST 8: Promoted Primary failed to process client operations.");
+                System.out.println("\n>>> [FAIL] TEST 8: Manager proxy failed to route post-failover client operations.");
             }
 
             // =========================================================================

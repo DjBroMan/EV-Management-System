@@ -1,13 +1,13 @@
-import java.rmi.Remote;
 import java.rmi.RemoteException;
 import Clock.LamportResult;
 
 /**
  * Remote interface exposed by ReservationServerManager.
- * Used by ReservationServer (Primary) to dispatch replication events,
- * and by administrative/testing tools to inspect or trigger failover.
+ * Extends ReservationInterface so the Manager can act as the single entry point proxy
+ * for EVClient, while also providing replication dispatch, full synchronization,
+ * health checks, and failover management.
  */
-public interface ReservationManagerInterface extends Remote {
+public interface ReservationManagerInterface extends ReservationInterface {
 
     /**
      * Dispatches a new reservation state change to the secondary replica.
@@ -33,7 +33,7 @@ public interface ReservationManagerInterface extends Remote {
             long clientLamport) throws RemoteException;
 
     /**
-     * Checks if Primary is reachable; if not, promotes Secondary to Primary.
+     * Checks if Primary is reachable; if not, promotes Secondary to Primary and routes traffic.
      */
     LamportResult<Boolean> checkAndFailover(
             long clientLamport) throws RemoteException;
@@ -44,3 +44,4 @@ public interface ReservationManagerInterface extends Remote {
     LamportResult<String> getReplicationStatus(
             long clientLamport) throws RemoteException;
 }
+

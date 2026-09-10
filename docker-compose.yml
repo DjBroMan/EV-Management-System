@@ -123,14 +123,16 @@ services:
     environment:
       - RMI_SERVER_HOST=charging-session
       - STATION_HOST=charging-station
-      - RESERVATION_HOST=reservation-primary
+      - MANAGER_HOST=reservation-manager
+      - MANAGER_PORT=1240
+      - RESERVATION_HOST=reservation-manager
       - TIME_SERVER_HOST=time-server
       - LD_PRELOAD=/usr/lib/x86_64-linux-gnu/faketime/libfaketime.so.1
       - FAKETIME=@2026-08-26 15:29:55
     depends_on:
       - time-server
       - charging-station
-      - reservation-primary
+      - reservation-manager
     networks:
       - ev-rmi-network
 

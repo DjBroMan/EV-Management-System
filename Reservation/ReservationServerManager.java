@@ -8,8 +8,13 @@ import Clock.CristianClient;
 import Clock.DistributedLogger;
 import Clock.LamportResult;
 
-// Reservation Server Manager coordinates primary-backup replication,
-// full state synchronization, health checks, and failover promotion.
+/**
+ * Reservation Server Manager coordinates primary-backup replication,
+ * full state synchronization, health checks, failover promotion,
+ * and acts as the SINGLE ENTRY POINT (Proxy / Router) for EVClient.
+ *
+ * EVClient -> Manager (:1240) -> Current Primary (:1235 or :1245)
+ */
 public class ReservationServerManager extends UnicastRemoteObject
         implements ReservationManagerInterface {
 
@@ -18,9 +23,34 @@ public class ReservationServerManager extends UnicastRemoteObject
 
     private final LogicalClock logicalClock = new LogicalClock();
 
-    private String primaryUrl;
-    private String secondaryUrl;
+    private volatile String primaryHost;
+    private volatile int primaryPort;
+    private volatile String secondaryHost;
+    private volatile int secondaryPort;
+
+    private volatile String currentPrimaryHost;
+    private volatile int currentPrimaryPort;
+
     private final int registryPort;
+
+    public ReservationServerManager(
+            String primaryHost,
+            int primaryPort,
+            String secondaryHost,
+            int secondaryPort,
+            int registryPort,
+            int exportPort) throws RemoteException {
+
+        super(exportPort);
+        this.primaryHost = primaryHost;
+        this.primaryPort = primaryPort;
+        this.secondaryHost = secondaryHost;
+        this.secondaryPort = secondaryPort;
+
+        this.currentPrimaryHost = primaryHost;
+        this.currentPrimaryPort = primaryPort;
+        this.registryPort = registryPort;
+    }
 
     public ReservationServerManager(
             String primaryUrl,
@@ -29,9 +59,32 @@ public class ReservationServerManager extends UnicastRemoteObject
             int exportPort) throws RemoteException {
 
         super(exportPort);
-        this.primaryUrl = primaryUrl;
-        this.secondaryUrl = secondaryUrl;
         this.registryPort = registryPort;
+        parseAndSetEndpoints(primaryUrl, secondaryUrl);
+    }
+
+    private void parseAndSetEndpoints(String priUrl, String secUrl) {
+        try {
+            // e.g. rmi://localhost:1235/ReservationReplicationService
+            String pClean = priUrl.replace("rmi://", "");
+            String pHostPort = pClean.substring(0, pClean.indexOf('/'));
+            String[] pParts = pHostPort.split(":");
+            this.primaryHost = pParts[0];
+            this.primaryPort = Integer.parseInt(pParts[1]);
+
+            String sClean = secUrl.replace("rmi://", "");
+            String sHostPort = sClean.substring(0, sClean.indexOf('/'));
+            String[] sParts = sHostPort.split(":");
+            this.secondaryHost = sParts[0];
+            this.secondaryPort = Integer.parseInt(sParts[1]);
+        } catch (Exception e) {
+            this.primaryHost = "localhost";
+            this.primaryPort = 1235;
+            this.secondaryHost = "localhost";
+            this.secondaryPort = 1245;
+        }
+        this.currentPrimaryHost = this.primaryHost;
+        this.currentPrimaryPort = this.primaryPort;
     }
 
     private void log(String message) {
@@ -42,33 +95,265 @@ public class ReservationServerManager extends UnicastRemoteObject
         DistributedLogger.log(SERVER_NAME, logicalClock, eventType, message);
     }
 
-    public void setPrimaryUrl(String primaryUrl) {
-        this.primaryUrl = primaryUrl;
+    public String getCurrentPrimaryUrl() {
+        return "rmi://" + currentPrimaryHost + ":" + currentPrimaryPort + "/ReservationService";
     }
 
-    public void setSecondaryUrl(String secondaryUrl) {
-        this.secondaryUrl = secondaryUrl;
+    public String getCurrentPrimaryReplUrl() {
+        return "rmi://" + currentPrimaryHost + ":" + currentPrimaryPort + "/ReservationReplicationService";
     }
 
-    private ReservationReplicationInterface lookupSecondary() {
+    public String getSecondaryReplUrl() {
+        return "rmi://" + secondaryHost + ":" + secondaryPort + "/ReservationReplicationService";
+    }
+
+    private ReservationInterface lookupCurrentPrimaryService() {
         try {
-            return (ReservationReplicationInterface) Naming.lookup(secondaryUrl);
+            String url = getCurrentPrimaryUrl();
+            return (ReservationInterface) Naming.lookup(url);
         } catch (Exception e) {
-            log("LOCAL", "Warning: Secondary server at " + secondaryUrl + " is unreachable: " + e.getMessage());
+            log("LOCAL", "Warning: Current Primary service at " + getCurrentPrimaryUrl() + " is unreachable: " + e.getMessage());
             return null;
         }
     }
 
-    private ReservationReplicationInterface lookupPrimary() {
+    private ReservationReplicationInterface lookupCurrentPrimaryReplication() {
         try {
-            return (ReservationReplicationInterface) Naming.lookup(primaryUrl);
+            String url = getCurrentPrimaryReplUrl();
+            return (ReservationReplicationInterface) Naming.lookup(url);
         } catch (Exception e) {
-            log("LOCAL", "Warning: Primary server at " + primaryUrl + " is unreachable: " + e.getMessage());
+            log("LOCAL", "Warning: Current Primary replication at " + getCurrentPrimaryReplUrl() + " is unreachable: " + e.getMessage());
             return null;
         }
     }
 
-    public String synchronizeClock() {
+    private ReservationReplicationInterface lookupSecondaryReplication() {
+        try {
+            String url = getSecondaryReplUrl();
+            return (ReservationReplicationInterface) Naming.lookup(url);
+        } catch (Exception e) {
+            log("LOCAL", "Warning: Secondary replication at " + getSecondaryReplUrl() + " is unreachable: " + e.getMessage());
+            return null;
+        }
+    }
+
+    // =========================================================
+    // PROXY FORWARDING (EVCLIENT -> MANAGER -> CURRENT PRIMARY)
+    // =========================================================
+
+    @Override
+    public String reserveSlot(String userId, String vehicleId) throws RemoteException {
+        return reserveSlot(userId, vehicleId, 0).getData();
+    }
+
+    @Override
+    public LamportResult<String> reserveSlot(
+            String userId,
+            String vehicleId,
+            long clientLamport) throws RemoteException {
+
+        long recvL = logicalClock.receiveEvent(clientLamport);
+        log("RECEIVE", "PROXY_RESERVE_SLOT received from User " + userId + ", Vehicle " + vehicleId
+                + " (Client Lamport: " + clientLamport + "). Clock updated to " + recvL);
+
+        ReservationInterface primary = lookupCurrentPrimaryService();
+        if (primary == null) {
+            log("LOCAL", "Current Primary unreachable. Attempting automatic failover...");
+            if (performFailoverInternal()) {
+                primary = lookupCurrentPrimaryService();
+            }
+        }
+
+        if (primary == null) {
+            log("LOCAL", "ERROR: No reachable ReservationServer found (Primary and Secondary unavailable).");
+            long respL = logicalClock.sendEvent();
+            return new LamportResult<>("Reservation failed: Reservation cluster is unavailable.", respL);
+        }
+
+        try {
+            long sendL = logicalClock.sendEvent();
+            log("SEND", "ROUTING: Forwarding reserveSlot to current Primary at " + getCurrentPrimaryUrl() + " (Lamport: " + sendL + ")");
+            LamportResult<String> priRes = primary.reserveSlot(userId, vehicleId, sendL);
+            logicalClock.receiveEvent(priRes.getTimestamp());
+            log("RECEIVE", "Primary returned reservation response (Primary Lamport: " + priRes.getTimestamp() + ")");
+
+            long respL = logicalClock.sendEvent();
+            log("SEND", "Returning proxied RESERVE_SLOT response to EVClient (Lamport: " + respL + ")");
+            return new LamportResult<>(priRes.getData(), respL);
+        } catch (RemoteException re) {
+            log("LOCAL", "RemoteException calling Primary during reserveSlot: " + re.getMessage() + ". Attempting failover...");
+            if (performFailoverInternal()) {
+                primary = lookupCurrentPrimaryService();
+                if (primary != null) {
+                    long sendL = logicalClock.sendEvent();
+                    log("SEND", "ROUTING: Retrying reserveSlot on newly promoted Primary at " + getCurrentPrimaryUrl() + " (Lamport: " + sendL + ")");
+                    LamportResult<String> priRes = primary.reserveSlot(userId, vehicleId, sendL);
+                    logicalClock.receiveEvent(priRes.getTimestamp());
+                    long respL = logicalClock.sendEvent();
+                    return new LamportResult<>(priRes.getData(), respL);
+                }
+            }
+            long respL = logicalClock.sendEvent();
+            return new LamportResult<>("Reservation failed: Primary server unavailable (" + re.getMessage() + ").", respL);
+        }
+    }
+
+    @Override
+    public String cancelReservation(String reservationId) throws RemoteException {
+        return cancelReservation(reservationId, 0).getData();
+    }
+
+    @Override
+    public LamportResult<String> cancelReservation(
+            String reservationId,
+            long clientLamport) throws RemoteException {
+
+        long recvL = logicalClock.receiveEvent(clientLamport);
+        log("RECEIVE", "PROXY_CANCEL_RESERVATION received for ID " + reservationId
+                + " (Client Lamport: " + clientLamport + "). Clock updated to " + recvL);
+
+        ReservationInterface primary = lookupCurrentPrimaryService();
+        if (primary == null) {
+            log("LOCAL", "Current Primary unreachable. Attempting automatic failover...");
+            if (performFailoverInternal()) {
+                primary = lookupCurrentPrimaryService();
+            }
+        }
+
+        if (primary == null) {
+            long respL = logicalClock.sendEvent();
+            return new LamportResult<>("Cancellation failed: Reservation cluster is unavailable.", respL);
+        }
+
+        try {
+            long sendL = logicalClock.sendEvent();
+            log("SEND", "ROUTING: Forwarding cancelReservation to current Primary at " + getCurrentPrimaryUrl() + " (Lamport: " + sendL + ")");
+            LamportResult<String> priRes = primary.cancelReservation(reservationId, sendL);
+            logicalClock.receiveEvent(priRes.getTimestamp());
+            log("RECEIVE", "Primary returned cancellation response (Primary Lamport: " + priRes.getTimestamp() + ")");
+
+            long respL = logicalClock.sendEvent();
+            log("SEND", "Returning proxied CANCEL_RESERVATION response to EVClient (Lamport: " + respL + ")");
+            return new LamportResult<>(priRes.getData(), respL);
+        } catch (RemoteException re) {
+            log("LOCAL", "RemoteException calling Primary during cancelReservation: " + re.getMessage() + ". Attempting failover...");
+            if (performFailoverInternal()) {
+                primary = lookupCurrentPrimaryService();
+                if (primary != null) {
+                    long sendL = logicalClock.sendEvent();
+                    LamportResult<String> priRes = primary.cancelReservation(reservationId, sendL);
+                    logicalClock.receiveEvent(priRes.getTimestamp());
+                    long respL = logicalClock.sendEvent();
+                    return new LamportResult<>(priRes.getData(), respL);
+                }
+            }
+            long respL = logicalClock.sendEvent();
+            return new LamportResult<>("Cancellation failed: Primary server unavailable (" + re.getMessage() + ").", respL);
+        }
+    }
+
+    @Override
+    public String getReservation(String reservationId) throws RemoteException {
+        return getReservation(reservationId, 0).getData();
+    }
+
+    @Override
+    public LamportResult<String> getReservation(
+            String reservationId,
+            long clientLamport) throws RemoteException {
+
+        long recvL = logicalClock.receiveEvent(clientLamport);
+        log("RECEIVE", "PROXY_GET_RESERVATION received for ID " + reservationId
+                + " (Client Lamport: " + clientLamport + "). Clock updated to " + recvL);
+
+        ReservationInterface primary = lookupCurrentPrimaryService();
+        if (primary == null) {
+            if (performFailoverInternal()) {
+                primary = lookupCurrentPrimaryService();
+            }
+        }
+
+        if (primary == null) {
+            long respL = logicalClock.sendEvent();
+            return new LamportResult<>("Reservation " + reservationId + " not found (Cluster unavailable).", respL);
+        }
+
+        try {
+            long sendL = logicalClock.sendEvent();
+            log("SEND", "ROUTING: Forwarding getReservation to current Primary at " + getCurrentPrimaryUrl() + " (Lamport: " + sendL + ")");
+            LamportResult<String> priRes = primary.getReservation(reservationId, sendL);
+            logicalClock.receiveEvent(priRes.getTimestamp());
+
+            long respL = logicalClock.sendEvent();
+            return new LamportResult<>(priRes.getData(), respL);
+        } catch (RemoteException re) {
+            if (performFailoverInternal()) {
+                primary = lookupCurrentPrimaryService();
+                if (primary != null) {
+                    long sendL = logicalClock.sendEvent();
+                    LamportResult<String> priRes = primary.getReservation(reservationId, sendL);
+                    logicalClock.receiveEvent(priRes.getTimestamp());
+                    long respL = logicalClock.sendEvent();
+                    return new LamportResult<>(priRes.getData(), respL);
+                }
+            }
+            long respL = logicalClock.sendEvent();
+            return new LamportResult<>("Reservation " + reservationId + " query failed (" + re.getMessage() + ").", respL);
+        }
+    }
+
+    @Override
+    public String getReservationPort(String reservationId) throws RemoteException {
+        return getReservationPort(reservationId, 0).getData();
+    }
+
+    @Override
+    public LamportResult<String> getReservationPort(
+            String reservationId,
+            long clientLamport) throws RemoteException {
+
+        long recvL = logicalClock.receiveEvent(clientLamport);
+        log("RECEIVE", "PROXY_GET_RESERVATION_PORT received for ID " + reservationId
+                + " (Client Lamport: " + clientLamport + "). Clock updated to " + recvL);
+
+        ReservationInterface primary = lookupCurrentPrimaryService();
+        if (primary == null) {
+            if (performFailoverInternal()) {
+                primary = lookupCurrentPrimaryService();
+            }
+        }
+
+        if (primary == null) {
+            long respL = logicalClock.sendEvent();
+            return new LamportResult<>("NONE", respL);
+        }
+
+        try {
+            long sendL = logicalClock.sendEvent();
+            log("SEND", "ROUTING: Forwarding getReservationPort to current Primary at " + getCurrentPrimaryUrl() + " (Lamport: " + sendL + ")");
+            LamportResult<String> priRes = primary.getReservationPort(reservationId, sendL);
+            logicalClock.receiveEvent(priRes.getTimestamp());
+
+            long respL = logicalClock.sendEvent();
+            return new LamportResult<>(priRes.getData(), respL);
+        } catch (RemoteException re) {
+            if (performFailoverInternal()) {
+                primary = lookupCurrentPrimaryService();
+                if (primary != null) {
+                    long sendL = logicalClock.sendEvent();
+                    LamportResult<String> priRes = primary.getReservationPort(reservationId, sendL);
+                    logicalClock.receiveEvent(priRes.getTimestamp());
+                    long respL = logicalClock.sendEvent();
+                    return new LamportResult<>(priRes.getData(), respL);
+                }
+            }
+            long respL = logicalClock.sendEvent();
+            return new LamportResult<>("NONE", respL);
+        }
+    }
+
+    @Override
+    public String synchronizeClock() throws RemoteException {
         logicalClock.tick();
         log("LOCAL", "Initiating Cristian Physical Clock Synchronization...");
         String timeServerHost = System.getenv("TIME_SERVER_HOST");
@@ -102,7 +387,13 @@ public class ReservationServerManager extends UnicastRemoteObject
         long recvL = logicalClock.receiveEvent(clientLamport);
         log("RECEIVE", "STATE_UPDATE received from Primary: " + reservationId + " -> " + portId + " (Primary Lamport: " + clientLamport + "). Clock updated to " + recvL);
 
-        ReservationReplicationInterface secondary = lookupSecondary();
+        // If current primary is already the secondary, replication is not forwarded back to itself
+        if (this.currentPrimaryPort == this.secondaryPort) {
+            long respL = logicalClock.sendEvent();
+            return new LamportResult<>(true, respL);
+        }
+
+        ReservationReplicationInterface secondary = lookupSecondaryReplication();
         if (secondary == null) {
             log("LOCAL", "REPLICATION_FAILED: Secondary replica is unreachable. Replication aborted.");
             long respL = logicalClock.sendEvent();
@@ -135,7 +426,12 @@ public class ReservationServerManager extends UnicastRemoteObject
         long recvL = logicalClock.receiveEvent(clientLamport);
         log("RECEIVE", "CANCELLATION_UPDATE received from Primary for " + reservationId + " (Primary Lamport: " + clientLamport + "). Clock updated to " + recvL);
 
-        ReservationReplicationInterface secondary = lookupSecondary();
+        if (this.currentPrimaryPort == this.secondaryPort) {
+            long respL = logicalClock.sendEvent();
+            return new LamportResult<>(true, respL);
+        }
+
+        ReservationReplicationInterface secondary = lookupSecondaryReplication();
         if (secondary == null) {
             log("LOCAL", "CANCELLATION_REPLICATION_FAILED: Secondary replica is unreachable.");
             long respL = logicalClock.sendEvent();
@@ -169,8 +465,8 @@ public class ReservationServerManager extends UnicastRemoteObject
         long recvL = logicalClock.receiveEvent(clientLamport);
         log("RECEIVE", "FULL_SYNC_REQUEST triggered (Lamport: " + clientLamport + "). Clock updated to " + recvL);
 
-        ReservationReplicationInterface primary = lookupPrimary();
-        ReservationReplicationInterface secondary = lookupSecondary();
+        ReservationReplicationInterface primary = lookupCurrentPrimaryReplication();
+        ReservationReplicationInterface secondary = lookupSecondaryReplication();
 
         if (primary == null) {
             log("LOCAL", "FULL_SYNC_FAILED: Primary is unreachable.");
@@ -212,37 +508,17 @@ public class ReservationServerManager extends UnicastRemoteObject
     // FAILOVER & PROMOTION
     // =========================================================
 
-    @Override
-    public LamportResult<Boolean> checkAndFailover(long clientLamport) throws RemoteException {
-        long recvL = logicalClock.receiveEvent(clientLamport);
-        log("RECEIVE", "FAILOVER_CHECK received (Lamport: " + clientLamport + "). Clock updated to " + recvL);
-
-        boolean primaryAlive = false;
-        try {
-            ReservationReplicationInterface primary = lookupPrimary();
-            if (primary != null) {
-                long pingSendL = logicalClock.sendEvent();
-                LamportResult<Boolean> pingRes = primary.ping(pingSendL);
-                logicalClock.receiveEvent(pingRes.getTimestamp());
-                primaryAlive = pingRes.getData();
-            }
-        } catch (Exception e) {
-            primaryAlive = false;
+    private synchronized boolean performFailoverInternal() {
+        if (this.currentPrimaryPort == this.secondaryPort) {
+            // Already failed over to secondary
+            return false;
         }
 
-        if (primaryAlive) {
-            log("LOCAL", "Primary is healthy. No failover required.");
-            long respL = logicalClock.sendEvent();
-            return new LamportResult<>(false, respL);
-        }
-
-        log("LOCAL", "PRIMARY SERVER FAILURE DETECTED! Initiating failover promotion to Secondary...");
-
-        ReservationReplicationInterface secondary = lookupSecondary();
+        log("LOCAL", "PRIMARY FAILURE DETECTED! Initiating automated failover promotion to Secondary...");
+        ReservationReplicationInterface secondary = lookupSecondaryReplication();
         if (secondary == null) {
-            log("LOCAL", "FAILOVER_FAILED: Secondary is also unreachable.");
-            long respL = logicalClock.sendEvent();
-            return new LamportResult<>(false, respL);
+            log("LOCAL", "FAILOVER_FAILED: Secondary server at " + getSecondaryReplUrl() + " is also unreachable.");
+            return false;
         }
 
         try {
@@ -252,17 +528,50 @@ public class ReservationServerManager extends UnicastRemoteObject
             logicalClock.receiveEvent(promoRes.getTimestamp());
             log("RECEIVE", "Secondary confirmed promotion to PRIMARY (Lamport: " + promoRes.getTimestamp() + ")");
 
-            // Update Primary URL to point to newly promoted server
-            this.primaryUrl = this.secondaryUrl;
+            // Update Current Primary URL to point to newly promoted Secondary server
+            this.currentPrimaryHost = this.secondaryHost;
+            this.currentPrimaryPort = this.secondaryPort;
 
-            long respL = logicalClock.sendEvent();
-            log("SEND", "FAILOVER_COMPLETED: Secondary successfully promoted to PRIMARY role (Lamport: " + respL + ")");
-            return new LamportResult<>(true, respL);
+            log("LOCAL", "FAILOVER_COMPLETED: Router updated currentPrimaryUrl -> " + getCurrentPrimaryUrl());
+            return true;
         } catch (Exception e) {
             log("LOCAL", "FAILOVER_ERROR: Failed to promote Secondary: " + e.getMessage());
+            return false;
+        }
+    }
+
+    @Override
+    public synchronized LamportResult<Boolean> checkAndFailover(long clientLamport) throws RemoteException {
+        long recvL = logicalClock.receiveEvent(clientLamport);
+        log("RECEIVE", "FAILOVER_CHECK received (Lamport: " + clientLamport + "). Clock updated to " + recvL);
+
+        boolean primaryAlive = false;
+        try {
+            ReservationReplicationInterface primary = lookupCurrentPrimaryReplication();
+            if (primary != null) {
+                long pingSendL = logicalClock.sendEvent();
+                LamportResult<Boolean> pingRes = primary.ping(pingSendL);
+                logicalClock.receiveEvent(pingRes.getTimestamp());
+
+                long roleSendL = logicalClock.sendEvent();
+                LamportResult<String> roleRes = primary.getRole(roleSendL);
+                logicalClock.receiveEvent(roleRes.getTimestamp());
+
+                primaryAlive = pingRes.getData() && "PRIMARY".equals(roleRes.getData());
+            }
+        } catch (Exception e) {
+            primaryAlive = false;
+        }
+
+        if (primaryAlive) {
+            log("LOCAL", "Primary is healthy and in PRIMARY role. No failover required.");
             long respL = logicalClock.sendEvent();
             return new LamportResult<>(false, respL);
         }
+
+        boolean failoverSuccess = performFailoverInternal();
+        long respL = logicalClock.sendEvent();
+        return new LamportResult<>(failoverSuccess, respL);
     }
 
     // =========================================================
@@ -282,7 +591,8 @@ public class ReservationServerManager extends UnicastRemoteObject
         int secCount = -1;
 
         try {
-            ReservationReplicationInterface primary = lookupPrimary();
+            String pUrl = "rmi://" + primaryHost + ":" + primaryPort + "/ReservationReplicationService";
+            ReservationReplicationInterface primary = (ReservationReplicationInterface) Naming.lookup(pUrl);
             if (primary != null) {
                 long pL = logicalClock.sendEvent();
                 LamportResult<Boolean> pingRes = primary.ping(pL);
@@ -304,7 +614,7 @@ public class ReservationServerManager extends UnicastRemoteObject
         }
 
         try {
-            ReservationReplicationInterface secondary = lookupSecondary();
+            ReservationReplicationInterface secondary = lookupSecondaryReplication();
             if (secondary != null) {
                 long pL = logicalClock.sendEvent();
                 LamportResult<Boolean> pingRes = secondary.ping(pL);
@@ -325,12 +635,13 @@ public class ReservationServerManager extends UnicastRemoteObject
             secAlive = false;
         }
 
-        String status = "=== REPLICATION CLUSTER STATUS ===\n"
-                + "Primary Server   (" + primaryUrl + "): Status=" + (priAlive ? "ONLINE" : "OFFLINE")
+        String status = "=== REPLICATION CLUSTER & ROUTER STATUS ===\n"
+                + "Router Active Primary Target: " + getCurrentPrimaryUrl() + "\n"
+                + "Initial Primary Server (" + primaryHost + ":" + primaryPort + "): Status=" + (priAlive ? "ONLINE" : "OFFLINE")
                 + ", Role=" + priRole + ", Active Reservations=" + priCount + "\n"
-                + "Secondary Server (" + secondaryUrl + "): Status=" + (secAlive ? "ONLINE" : "OFFLINE")
+                + "Secondary Server       (" + secondaryHost + ":" + secondaryPort + "): Status=" + (secAlive ? "ONLINE" : "OFFLINE")
                 + ", Role=" + secRole + ", Replicated Reservations=" + secCount + "\n"
-                + "Replication State: " + ((priAlive && secAlive && priCount == secCount) ? "SYNCHRONIZED" : "ATTENTION_REQUIRED");
+                + "Cluster Synchronization: " + ((priAlive && secAlive && priCount == secCount) ? "SYNCHRONIZED" : "ATTENTION_REQUIRED");
 
         long respL = logicalClock.sendEvent();
         return new LamportResult<>(status, respL);
@@ -351,13 +662,13 @@ public class ReservationServerManager extends UnicastRemoteObject
             if (primaryHost == null || primaryHost.trim().isEmpty()) {
                 primaryHost = "localhost";
             }
-            String primaryUrl = "rmi://" + primaryHost + ":1235/ReservationReplicationService";
+            int primaryPort = 1235;
 
             String secondaryHost = System.getenv("SECONDARY_HOST");
             if (secondaryHost == null || secondaryHost.trim().isEmpty()) {
                 secondaryHost = "localhost";
             }
-            String secondaryUrl = "rmi://" + secondaryHost + ":1245/ReservationReplicationService";
+            int secondaryPort = 1245;
 
             int regPort = 1240;
             int expPort = 2240;
@@ -374,19 +685,24 @@ public class ReservationServerManager extends UnicastRemoteObject
                 // Registry may already exist
             }
 
-            ReservationServerManager manager = new ReservationServerManager(primaryUrl, secondaryUrl, regPort, expPort);
+            ReservationServerManager manager = new ReservationServerManager(
+                    primaryHost, primaryPort, secondaryHost, secondaryPort, regPort, expPort);
 
             String managerUrl = "rmi://localhost:" + regPort + "/ReservationManager";
+            String serviceUrl = "rmi://localhost:" + regPort + "/ReservationService";
+
             Naming.rebind(managerUrl, manager);
+            Naming.rebind(serviceUrl, manager);
 
             System.out.println("=================================================");
-            System.out.println("   RESERVATION SERVER MANAGER");
+            System.out.println("   RESERVATION SERVER MANAGER (ROUTER / PROXY)");
             System.out.println("=================================================");
             System.out.println("Registry Port: " + regPort);
             System.out.println("Export Port: " + expPort);
-            System.out.println("Bound URL: " + managerUrl);
-            System.out.println("Primary Replica Target: " + primaryUrl);
-            System.out.println("Secondary Replica Target: " + secondaryUrl);
+            System.out.println("Bound Manager URL: " + managerUrl);
+            System.out.println("Bound Service URL: " + serviceUrl);
+            System.out.println("Primary Replica Target: " + manager.getCurrentPrimaryUrl());
+            System.out.println("Secondary Replica Target: " + manager.getSecondaryReplUrl());
 
             try {
                 manager.synchronizeClock();
@@ -394,7 +710,7 @@ public class ReservationServerManager extends UnicastRemoteObject
                 System.out.println("Startup clock synchronization warning: " + syncEx.getMessage());
             }
 
-            System.out.println("Manager ready and actively coordinating replication...");
+            System.out.println("Manager ready and routing client requests to Primary...");
             System.out.println("=================================================");
 
         } catch (Exception e) {

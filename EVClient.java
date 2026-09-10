@@ -30,8 +30,9 @@ public class EVClient {
                 @Override
                 public java.net.Socket createSocket(String host, int port) throws java.io.IOException {
                     if ("charging-station".equals(host) || "reservation".equals(host) ||
-                        "charging-session".equals(host) || "pricing".equals(host) ||
-                        "payment".equals(host) || "time-server".equals(host)) {
+                        "reservation-primary".equals(host) || "reservation-secondary".equals(host) ||
+                        "reservation-manager".equals(host) || "charging-session".equals(host) ||
+                        "pricing".equals(host) || "payment".equals(host) || "time-server".equals(host)) {
                         host = "localhost";
                     }
                     return new java.net.Socket(host, port);
@@ -128,8 +129,16 @@ public class EVClient {
     }
 
     private static ReservationInterface lookupReservation() throws Exception {
+        String host = getEnvHost("MANAGER_HOST", getEnvHost("RESERVATION_HOST", "localhost"));
+        int port = 1240;
+        String portStr = System.getenv("MANAGER_PORT");
+        if (portStr != null && !portStr.trim().isEmpty()) {
+            try {
+                port = Integer.parseInt(portStr.trim());
+            } catch (NumberFormatException ignored) {}
+        }
         return (ReservationInterface) Naming.lookup(
-                "rmi://" + getEnvHost("RESERVATION_HOST", "localhost") + ":1235/ReservationService"
+                "rmi://" + host + ":" + port + "/ReservationService"
         );
     }
 

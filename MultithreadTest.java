@@ -27,7 +27,7 @@ public class MultithreadTest {
     }
 
     private static final String RESERVATION_URL =
-            "rmi://" + getEnvHost("RESERVATION_HOST", "localhost") + ":1235/ReservationService";
+            "rmi://" + getEnvHost("MANAGER_HOST", getEnvHost("RESERVATION_HOST", "localhost")) + ":1240/ReservationService";
 
     private static final String SESSION_URL =
             "rmi://" + getEnvHost("SESSION_HOST", "localhost") + ":1236/ChargingSessionServer";
@@ -45,8 +45,9 @@ public class MultithreadTest {
                 @Override
                 public java.net.Socket createSocket(String host, int port) throws java.io.IOException {
                     if ("charging-station".equals(host) || "reservation".equals(host) ||
-                        "charging-session".equals(host) || "pricing".equals(host) ||
-                        "payment".equals(host) || "time-server".equals(host)) {
+                        "reservation-primary".equals(host) || "reservation-secondary".equals(host) ||
+                        "reservation-manager".equals(host) || "charging-session".equals(host) ||
+                        "pricing".equals(host) || "payment".equals(host) || "time-server".equals(host)) {
                         host = "localhost";
                     }
                     return new java.net.Socket(host, port);

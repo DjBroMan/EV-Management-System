@@ -509,11 +509,21 @@ public class ChargingSessionServer
 
             String reservationUrl = System.getenv("RESERVATION_URL");
             if (reservationUrl == null || reservationUrl.trim().isEmpty()) {
-                String resHost = System.getenv("RESERVATION_HOST");
+                String resHost = System.getenv("MANAGER_HOST");
                 if (resHost == null || resHost.trim().isEmpty()) {
-                    resHost = "localhost";
+                    resHost = System.getenv("RESERVATION_HOST");
+                    if (resHost == null || resHost.trim().isEmpty()) {
+                        resHost = "localhost";
+                    }
                 }
-                reservationUrl = "rmi://" + resHost + ":1235/ReservationService";
+                String resPort = System.getenv("MANAGER_PORT");
+                if (resPort == null || resPort.trim().isEmpty()) {
+                    resPort = System.getenv("RESERVATION_PORT");
+                    if (resPort == null || resPort.trim().isEmpty()) {
+                        resPort = "1240";
+                    }
+                }
+                reservationUrl = "rmi://" + resHost + ":" + resPort + "/ReservationService";
             }
 
             ReservationInterface reservationServer = null;
