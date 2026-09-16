@@ -82,6 +82,12 @@ public class ChargingSessionServer
             System.out.println("[DB:ChargingSessionServer] DB_HOST not set. Running without database persistence.");
             return;
         }
+        java.sql.Connection probe = DBConnectionHelper.getConnectionWithRetry("ChargingSessionServer", 15);
+        if (probe == null) {
+            System.out.println("[DB:ChargingSessionServer] Could not connect to DB. Running without persistence.");
+            return;
+        }
+        try { probe.close(); } catch (Exception ignore) {}
         try {
             this.dao = new ChargingSessionDAO();
             dao.loadAllSessions(reservationSessions, sessionStatus, energyConsumed,

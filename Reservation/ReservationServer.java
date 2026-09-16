@@ -108,6 +108,12 @@ public class ReservationServer extends UnicastRemoteObject
             System.out.println("[DB:" + serverName + "] DB_HOST not set. Running without database persistence.");
             return;
         }
+        java.sql.Connection probe = DBConnectionHelper.getConnectionWithRetry(serverName, 15);
+        if (probe == null) {
+            System.out.println("[DB:" + serverName + "] Could not connect to DB. Running without persistence.");
+            return;
+        }
+        try { probe.close(); } catch (Exception ignore) {}
         try {
             this.dao = new ReservationDAO();
             // Recover in-memory maps from DB

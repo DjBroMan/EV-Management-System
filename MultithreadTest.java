@@ -238,10 +238,12 @@ public class MultithreadTest {
             System.out.println("[OK] PaymentServer");
             System.out.println("\nAll EV threads completed.");
             System.out.println("============================================================");
+            System.exit(0);
 
         } catch (Exception e) {
             System.out.println("\nMULTITHREADED TEST FAILED\nError: " + e.getMessage());
             e.printStackTrace();
+            System.exit(1);
         }
     }
 

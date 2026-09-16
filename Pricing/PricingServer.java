@@ -43,6 +43,12 @@ public class PricingServer extends UnicastRemoteObject
             System.out.println("[DB:PricingServer] DB_HOST not set. Running without database persistence.");
             return;
         }
+        java.sql.Connection probe = DBConnectionHelper.getConnectionWithRetry("PricingServer", 15);
+        if (probe == null) {
+            System.out.println("[DB:PricingServer] Could not connect to DB. Running without persistence.");
+            return;
+        }
+        try { probe.close(); } catch (Exception ignore) {}
         try {
             this.dao = new PricingDAO();
             // Self-seed S01/S02/S03 on first startup (Option A)

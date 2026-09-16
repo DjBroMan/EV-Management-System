@@ -34,6 +34,13 @@ public class ChargingStationServer
             System.out.println("[DB:ChargingStationServer] DB_HOST not set. Running without database persistence.");
             return;
         }
+        // Probe DB connectivity with retry (MySQL may still be initializing)
+        java.sql.Connection probe = DBConnectionHelper.getConnectionWithRetry("ChargingStationServer", 15);
+        if (probe == null) {
+            System.out.println("[DB:ChargingStationServer] Could not connect to DB. Running without persistence.");
+            return;
+        }
+        try { probe.close(); } catch (Exception ignore) {}
         try {
             this.dao = new ChargingStationDAO();
             // Self-seed P1-P4 on first startup (Option A)

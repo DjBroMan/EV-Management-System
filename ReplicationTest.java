@@ -450,10 +450,12 @@ public class ReplicationTest {
             System.out.println("\n==================================================================================");
             System.out.println("   REPLICATION TEST SUITE SUMMARY: " + passed + " / " + total + " TESTS PASSED (100% SUCCESS)");
             System.out.println("==================================================================================");
+            System.exit(passed == total ? 0 : 1);
 
         } catch (Exception e) {
             System.out.println("\nEXCEPTION IN TEST EXECUTION: " + e.getMessage());
             e.printStackTrace();
+            System.exit(1);
         }
     }
 

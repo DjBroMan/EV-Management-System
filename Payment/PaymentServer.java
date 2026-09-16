@@ -70,6 +70,12 @@ public class PaymentServer
             System.out.println("[DB:PaymentServer] DB_HOST not set. Running without database persistence.");
             return;
         }
+        java.sql.Connection probe = DBConnectionHelper.getConnectionWithRetry("PaymentServer", 15);
+        if (probe == null) {
+            System.out.println("[DB:PaymentServer] Could not connect to DB. Running without persistence.");
+            return;
+        }
+        try { probe.close(); } catch (Exception ignore) {}
         try {
             this.dao = new PaymentDAO();
             dao.loadAllPayments(paymentStatus, paymentDetails);
