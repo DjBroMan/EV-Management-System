@@ -49,6 +49,9 @@ public class ChargingSessionServer
     private ReservationInterface reservationServer;
     private ChargingStationInterface chargingStation;
 
+    // Database access object — null when DB is not configured or unavailable
+    private ChargingSessionDAO dao = null;
+
     // Constructor
     public ChargingSessionServer(
             ReservationInterface reservationServer,
@@ -68,6 +71,31 @@ public class ChargingSessionServer
 
         this.reservationServer = reservationServer;
         this.chargingStation = chargingStation;
+    }
+
+    /**
+     * Connects to MySQL, restores all session state into the 6 in-memory maps,
+     * and recovers sessionCounter from MAX(session_id).
+     */
+    public void initWithDatabase() {
+        if (!DBConnectionHelper.isDatabaseConfigured()) {
+            System.out.println("[DB:ChargingSessionServer] DB_HOST not set. Running without database persistence.");
+            return;
+        }
+        try {
+            this.dao = new ChargingSessionDAO();
+            dao.loadAllSessions(reservationSessions, sessionStatus, energyConsumed,
+                    sessionPort, sessionStartTimes, sessionEndTimes, sessionChargingPowers);
+            int maxCounter = dao.getMaxCounter();
+            if (maxCounter >= sessionCounter) {
+                sessionCounter = maxCounter + 1;
+            }
+            System.out.println("[DB:ChargingSessionServer] Database initialized. Counter set to " + sessionCounter);
+        } catch (Exception e) {
+            System.out.println("[DB:ChargingSessionServer] WARNING: Database init failed: " + e.getMessage()
+                    + ". Continuing without DB persistence.");
+            this.dao = null;
+        }
     }
 
     private void log(String message) {
@@ -234,7 +262,21 @@ public class ChargingSessionServer
             sessionChargingPowers.put(sessionId, DEFAULT_CHARGING_POWER_KW);
             energyConsumed.put(sessionId, 0.0);
             logicalClock.tick();
-            log("LOCAL", "Charging session " + sessionId + " started for Reservation " + reservationId + " on Port " + portId + " at " + formatInstant(startTime) + " (Charging Power: " + DEFAULT_CHARGING_POWER_KW + " kW)");
+            log("LOCAL", "Charging session " + sessionId + " started for Reservation " + reservationId
+                    + " on Port " + portId + " at " + formatInstant(startTime)
+                    + " (Charging Power: " + DEFAULT_CHARGING_POWER_KW + " kW)");
+        }
+
+        // PERSIST to database
+        if (dao != null) {
+            try {
+                dao.insertSession(sessionId, reservationId, portId, DEFAULT_CHARGING_POWER_KW,
+                        PhysicalClock.getSynchronizedPhysicalTimeMillis());
+                log("LOCAL", "[DB] Session " + sessionId + " persisted to database.");
+            } catch (Exception dbEx) {
+                log("LOCAL", "[DB] WARNING: Failed to persist session " + sessionId
+                        + ": " + dbEx.getMessage());
+            }
         }
 
         String result = "Charging Started Successfully!\n"
@@ -310,7 +352,24 @@ public class ChargingSessionServer
             energyConsumed.put(sessionId, calculatedEnergy);
             sessionStatus.put(sessionId, "COMPLETED");
             logicalClock.tick();
-            log("LOCAL", "Session " + sessionId + " ENERGY CALCULATION: Start=" + formatInstant(startTime) + ", End=" + formatInstant(endTime) + ", Duration=" + String.format("%.3f", durationSeconds) + "s, Power=" + power + " kW, Energy=" + String.format("%.4f", calculatedEnergy) + " kWh");
+            log("LOCAL", "Session " + sessionId + " ENERGY CALCULATION: Start=" + formatInstant(startTime)
+                    + ", End=" + formatInstant(endTime)
+                    + ", Duration=" + String.format("%.3f", durationSeconds) + "s"
+                    + ", Power=" + power + " kW"
+                    + ", Energy=" + String.format("%.4f", calculatedEnergy) + " kWh");
+        }
+
+        // PERSIST stop to database
+        if (dao != null) {
+            try {
+                dao.completeSession(sessionId,
+                        PhysicalClock.getSynchronizedPhysicalTimeMillis(),
+                        calculatedEnergy);
+                log("LOCAL", "[DB] Session " + sessionId + " marked COMPLETED in database.");
+            } catch (Exception dbEx) {
+                log("LOCAL", "[DB] WARNING: Failed to update session " + sessionId
+                        + " in DB: " + dbEx.getMessage());
+            }
         }
 
         String result = "Charging Stopped Successfully!\n"
@@ -549,6 +608,9 @@ public class ChargingSessionServer
             }
 
             ChargingSessionServer server = new ChargingSessionServer(reservationServer, chargingStation);
+
+            // Initialize database: restore sessions, recover counter
+            server.initWithDatabase();
 
             LocateRegistry.createRegistry(1236);
 

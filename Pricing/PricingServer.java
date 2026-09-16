@@ -21,6 +21,9 @@ public class PricingServer extends UnicastRemoteObject
     private static final double BASE_PRICE = 10.0;
     private Map<String, String> stationDemand;
 
+    // Database access object — null when DB is not configured or unavailable
+    private PricingDAO dao = null;
+
     protected PricingServer() throws RemoteException {
         super(2238);
 
@@ -28,6 +31,34 @@ public class PricingServer extends UnicastRemoteObject
         stationDemand.put("S01", "LOW");
         stationDemand.put("S02", "MEDIUM");
         stationDemand.put("S03", "HIGH");
+    }
+
+    /**
+     * Connects to the MySQL database, self-seeds S01/S02/S03 from the
+     * hardcoded stationDemand map if the table is empty, then loads the
+     * stationDemand map from DB for subsequent startups.
+     */
+    public void initWithDatabase() {
+        if (!DBConnectionHelper.isDatabaseConfigured()) {
+            System.out.println("[DB:PricingServer] DB_HOST not set. Running without database persistence.");
+            return;
+        }
+        try {
+            this.dao = new PricingDAO();
+            // Self-seed S01/S02/S03 on first startup (Option A)
+            dao.initTariffsIfEmpty(stationDemand, BASE_PRICE);
+            // Load current tariffs from DB — overwrites hardcoded defaults
+            Map<String, String> dbTariffs = dao.loadAllTariffs();
+            if (!dbTariffs.isEmpty()) {
+                stationDemand = dbTariffs;
+            }
+            System.out.println("[DB:PricingServer] Database initialized. Loaded "
+                    + stationDemand.size() + " tariff records.");
+        } catch (Exception e) {
+            System.out.println("[DB:PricingServer] WARNING: Database init failed: " + e.getMessage()
+                    + ". Continuing without DB persistence.");
+            this.dao = null;
+        }
     }
 
     private void log(String message) {
@@ -201,6 +232,9 @@ public class PricingServer extends UnicastRemoteObject
             LocateRegistry.createRegistry(1238);
 
             PricingServer server = new PricingServer();
+
+            // Initialize database: self-seed tariffs if empty, load from DB
+            server.initWithDatabase();
 
             Naming.rebind("rmi://localhost:1238/PricingService", server);
 

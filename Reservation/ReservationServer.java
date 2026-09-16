@@ -39,6 +39,9 @@ public class ReservationServer extends UnicastRemoteObject
     // Sequential counter for reservation IDs
     private int reservationCounter = 1001;
 
+    // Database access object — null when DB is not configured or unavailable
+    private ReservationDAO dao = null;
+
     // Remote reference to ChargingStationServer (used in PRIMARY role)
     private ChargingStationInterface chargingStation;
 
@@ -93,6 +96,52 @@ public class ReservationServer extends UnicastRemoteObject
             Thread.currentThread().interrupt();
             log("Thread interrupted during processing.");
         }
+    }
+
+    /**
+     * Connects to the MySQL database (primary or secondary instance selected by
+     * DB_NAME env var), loads all existing reservations into the in-memory maps,
+     * and recovers the reservation counter from MAX(reservation_id).
+     */
+    public void initWithDatabase() {
+        if (!DBConnectionHelper.isDatabaseConfigured()) {
+            System.out.println("[DB:" + serverName + "] DB_HOST not set. Running without database persistence.");
+            return;
+        }
+        try {
+            this.dao = new ReservationDAO();
+            // Recover in-memory maps from DB
+            Map<String, String> dbReservations = dao.loadAllReservations();
+            Map<String, String> dbPorts        = dao.loadAllReservationPorts();
+            synchronized (this) {
+                reservations.putAll(dbReservations);
+                reservationPorts.putAll(dbPorts);
+                int maxCounter = dao.getMaxCounter();
+                if (maxCounter >= reservationCounter) {
+                    reservationCounter = maxCounter + 1;
+                }
+            }
+            System.out.println("[DB:" + serverName + "] Database initialized. Loaded "
+                    + dbReservations.size() + " reservations. Counter set to " + reservationCounter);
+        } catch (Exception e) {
+            System.out.println("[DB:" + serverName + "] WARNING: Database init failed: " + e.getMessage()
+                    + ". Continuing without DB persistence.");
+            this.dao = null;
+        }
+    }
+
+    /**
+     * Parses a field value from the reservation details string.
+     * Format: "Reservation ID: RES1001, User ID: u1, Vehicle ID: EV-1, Port: P1, Status: CONFIRMED"
+     */
+    private static String extractFromDetails(String details, String key) {
+        if (details == null) return "";
+        String marker = key + ": ";
+        int start = details.indexOf(marker);
+        if (start == -1) return "";
+        start += marker.length();
+        int end = details.indexOf(",", start);
+        return (end == -1 ? details.substring(start) : details.substring(start, end)).trim();
     }
 
     private ReservationManagerInterface lookupManager() {
@@ -278,6 +327,18 @@ public class ReservationServer extends UnicastRemoteObject
             log("LOCAL", "Notice: ReservationServerManager not reachable. Operating in standalone/unreplicated mode.");
         }
 
+        // PERSIST TO DATABASE (after replication so memory is always ahead of DB)
+        if (dao != null) {
+            try {
+                dao.insertReservation(reservationId, userId, vehicleId, portId,
+                        PhysicalClock.getSynchronizedPhysicalTimeMillis());
+                log("LOCAL", "[DB] Reservation " + reservationId + " persisted to database.");
+            } catch (Exception dbEx) {
+                log("LOCAL", "[DB] WARNING: Failed to persist reservation " + reservationId
+                        + ": " + dbEx.getMessage());
+            }
+        }
+
         String result = "Reservation successful!\n" + reservationDetails;
         long respL = logicalClock.sendEvent();
         log("SEND", "Returning RESERVE SLOT response to client (Lamport: " + respL + ")");
@@ -329,6 +390,17 @@ public class ReservationServer extends UnicastRemoteObject
         }
 
         if (found) {
+            // PERSIST CANCELLATION TO DATABASE
+            if (dao != null) {
+                try {
+                    dao.deleteReservation(reservationId);
+                    log("LOCAL", "[DB] Reservation " + reservationId + " deleted from database.");
+                } catch (Exception dbEx) {
+                    log("LOCAL", "[DB] WARNING: Failed to delete reservation " + reservationId
+                            + " from DB: " + dbEx.getMessage());
+                }
+            }
+
             if (portId != null) {
                 ensureChargingStationConnected();
                 if (chargingStation != null) {
@@ -480,6 +552,20 @@ public class ReservationServer extends UnicastRemoteObject
                     + reservationCounter);
         }
 
+        // SECONDARY: persist the replicated record to its own DB instance
+        if (dao != null) {
+            try {
+                String userId   = extractFromDetails(reservationDetails, "User ID");
+                String vehicleId = extractFromDetails(reservationDetails, "Vehicle ID");
+                dao.insertReservation(reservationId, userId, vehicleId, portId,
+                        PhysicalClock.getSynchronizedPhysicalTimeMillis());
+                log("LOCAL", "[DB] SECONDARY: Replicated reservation " + reservationId + " persisted to DB.");
+            } catch (Exception dbEx) {
+                log("LOCAL", "[DB] WARNING: Failed to persist replicated reservation " + reservationId
+                        + " on secondary: " + dbEx.getMessage());
+            }
+        }
+
         long respL = logicalClock.sendEvent();
         log("SEND", "Returning REPLICATION_ACK to Manager (Lamport: " + respL + ")");
         return new LamportResult<>(true, respL);
@@ -499,6 +585,17 @@ public class ReservationServer extends UnicastRemoteObject
             reservationPorts.remove(reservationId);
             logicalClock.tick();
             log("LOCAL", "REPLICATION_APPLIED: Removed reservation " + reservationId + " from replica state.");
+        }
+
+        // SECONDARY: delete the cancelled record from its own DB instance
+        if (dao != null) {
+            try {
+                dao.deleteReservation(reservationId);
+                log("LOCAL", "[DB] SECONDARY: Cancelled reservation " + reservationId + " deleted from DB.");
+            } catch (Exception dbEx) {
+                log("LOCAL", "[DB] WARNING: Failed to delete cancelled reservation " + reservationId
+                        + " from secondary DB: " + dbEx.getMessage());
+            }
         }
 
         long respL = logicalClock.sendEvent();
@@ -530,6 +627,27 @@ public class ReservationServer extends UnicastRemoteObject
             logicalClock.tick();
             log("LOCAL", "FULL_SYNC_APPLIED: Restored " + reservations.size() + " reservations. Counter set to "
                     + reservationCounter);
+        }
+
+        // SECONDARY: rebuild DB to match the new snapshot
+        if (dao != null) {
+            try {
+                dao.deleteAllReservations();
+                long ts = PhysicalClock.getSynchronizedPhysicalTimeMillis();
+                for (Map.Entry<String, String> entry : snapshot.getReservations().entrySet()) {
+                    String resId   = entry.getKey();
+                    String details = entry.getValue();
+                    String userId   = extractFromDetails(details, "User ID");
+                    String vehicleId = extractFromDetails(details, "Vehicle ID");
+                    String portId   = snapshot.getReservationPorts().get(resId);
+                    if (portId == null) portId = "UNKNOWN";
+                    dao.insertReservation(resId, userId, vehicleId, portId, ts);
+                }
+                log("LOCAL", "[DB] FULL_SYNC: Rebuilt DB with " + snapshot.getReservations().size()
+                        + " reservation records.");
+            } catch (Exception dbEx) {
+                log("LOCAL", "[DB] WARNING: Failed to rebuild DB during full sync: " + dbEx.getMessage());
+            }
         }
 
         long respL = logicalClock.sendEvent();
@@ -603,6 +721,17 @@ public class ReservationServer extends UnicastRemoteObject
             logicalClock.tick();
             log("LOCAL", "RESET_STATE: State cleared and role set to " + this.role);
         }
+
+        // Clear the DB to match the reset in-memory state
+        if (dao != null) {
+            try {
+                dao.deleteAllReservations();
+                log("LOCAL", "[DB] RESET_STATE: DB reservations table cleared.");
+            } catch (Exception dbEx) {
+                log("LOCAL", "[DB] WARNING: Failed to clear DB during reset: " + dbEx.getMessage());
+            }
+        }
+
         long respL = logicalClock.sendEvent();
         return new LamportResult<>(true, respL);
     }
@@ -703,6 +832,9 @@ public class ReservationServer extends UnicastRemoteObject
             }
 
             ReservationServer server = new ReservationServer(chargingStation, role, regPort, expPort);
+
+            // Initialize database: load existing reservations, recover counter
+            server.initWithDatabase();
 
             String serviceBindUrl = "rmi://localhost:" + regPort + "/ReservationService";
             String replBindUrl = "rmi://localhost:" + regPort + "/ReservationReplicationService";

@@ -1,4 +1,9 @@
 services:
+
+  # ================================================================
+  # INFRASTRUCTURE: Time Server (no DB)
+  # ================================================================
+
   time-server:
     build: .
     container_name: time-server
@@ -11,10 +16,130 @@ services:
     networks:
       - ev-rmi-network
 
+  # ================================================================
+  # DATABASE: MySQL instances (one per server instance)
+  # ================================================================
+
+  mysql-station:
+    image: mysql:8.0
+    container_name: mysql-station
+    environment:
+      MYSQL_ROOT_PASSWORD: evroot
+      MYSQL_DATABASE: ev_station_db
+    volumes:
+      - station-db-data:/var/lib/mysql
+      - ./db/init/01_ev_station_db.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-pevroot"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    networks:
+      - ev-rmi-network
+
+  mysql-reservation-primary:
+    image: mysql:8.0
+    container_name: mysql-reservation-primary
+    environment:
+      MYSQL_ROOT_PASSWORD: evroot
+      MYSQL_DATABASE: ev_reservation_primary_db
+    volumes:
+      - res-primary-db-data:/var/lib/mysql
+      - ./db/init/02_ev_reservation_primary_db.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "3307:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-pevroot"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    networks:
+      - ev-rmi-network
+
+  mysql-reservation-secondary:
+    image: mysql:8.0
+    container_name: mysql-reservation-secondary
+    environment:
+      MYSQL_ROOT_PASSWORD: evroot
+      MYSQL_DATABASE: ev_reservation_secondary_db
+    volumes:
+      - res-secondary-db-data:/var/lib/mysql
+      - ./db/init/03_ev_reservation_secondary_db.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "3308:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-pevroot"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    networks:
+      - ev-rmi-network
+
+  mysql-session:
+    image: mysql:8.0
+    container_name: mysql-session
+    environment:
+      MYSQL_ROOT_PASSWORD: evroot
+      MYSQL_DATABASE: ev_session_db
+    volumes:
+      - session-db-data:/var/lib/mysql
+      - ./db/init/04_ev_session_db.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-pevroot"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    networks:
+      - ev-rmi-network
+
+  mysql-pricing:
+    image: mysql:8.0
+    container_name: mysql-pricing
+    environment:
+      MYSQL_ROOT_PASSWORD: evroot
+      MYSQL_DATABASE: ev_pricing_db
+    volumes:
+      - pricing-db-data:/var/lib/mysql
+      - ./db/init/05_ev_pricing_db.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-pevroot"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    networks:
+      - ev-rmi-network
+
+  mysql-payment:
+    image: mysql:8.0
+    container_name: mysql-payment
+    environment:
+      MYSQL_ROOT_PASSWORD: evroot
+      MYSQL_DATABASE: ev_payment_db
+    volumes:
+      - payment-db-data:/var/lib/mysql
+      - ./db/init/06_ev_payment_db.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-pevroot"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    networks:
+      - ev-rmi-network
+
+  # ================================================================
+  # APPLICATION SERVICES (Java RMI Servers)
+  # ================================================================
+
   charging-station:
     build: .
     container_name: charging-station
-    command: java -cp /app/bin ChargingStationServer
+    command: java -cp /app/bin:/mysql-lib/mysql-connector-j-8.0.33.jar ChargingStationServer
     ports:
       - "1234:1234"
       - "2234:2234"
@@ -23,15 +148,24 @@ services:
       - TIME_SERVER_HOST=time-server
       - LD_PRELOAD=/usr/lib/x86_64-linux-gnu/faketime/libfaketime.so.1
       - FAKETIME=@2026-08-26 15:30:10
+      # Database connection (ev_station_db)
+      - DB_HOST=mysql-station
+      - DB_PORT=3306
+      - DB_NAME=ev_station_db
+      - DB_USER=root
+      - DB_PASSWORD=evroot
     depends_on:
-      - time-server
+      time-server:
+        condition: service_started
+      mysql-station:
+        condition: service_healthy
     networks:
       - ev-rmi-network
 
   pricing:
     build: .
     container_name: pricing
-    command: java -cp /app/bin PricingServer
+    command: java -cp /app/bin:/mysql-lib/mysql-connector-j-8.0.33.jar PricingServer
     ports:
       - "1238:1238"
       - "2238:2238"
@@ -40,15 +174,24 @@ services:
       - TIME_SERVER_HOST=time-server
       - LD_PRELOAD=/usr/lib/x86_64-linux-gnu/faketime/libfaketime.so.1
       - FAKETIME=@2026-08-26 15:30:03
+      # Database connection (ev_pricing_db)
+      - DB_HOST=mysql-pricing
+      - DB_PORT=3306
+      - DB_NAME=ev_pricing_db
+      - DB_USER=root
+      - DB_PASSWORD=evroot
     depends_on:
-      - time-server
+      time-server:
+        condition: service_started
+      mysql-pricing:
+        condition: service_healthy
     networks:
       - ev-rmi-network
 
   reservation-primary:
     build: .
     container_name: reservation-primary
-    command: java -cp /app/bin ReservationServer primary 1235
+    command: java -cp /app/bin:/mysql-lib/mysql-connector-j-8.0.33.jar ReservationServer primary 1235
     ports:
       - "1235:1235"
       - "2235:2235"
@@ -62,16 +205,26 @@ services:
       - TIME_SERVER_HOST=time-server
       - LD_PRELOAD=/usr/lib/x86_64-linux-gnu/faketime/libfaketime.so.1
       - FAKETIME=@2026-08-26 15:30:05
+      # Database connection (PRIMARY uses ev_reservation_primary_db)
+      - DB_HOST=mysql-reservation-primary
+      - DB_PORT=3306
+      - DB_NAME=ev_reservation_primary_db
+      - DB_USER=root
+      - DB_PASSWORD=evroot
     depends_on:
-      - time-server
-      - charging-station
+      time-server:
+        condition: service_started
+      charging-station:
+        condition: service_started
+      mysql-reservation-primary:
+        condition: service_healthy
     networks:
       - ev-rmi-network
 
   reservation-secondary:
     build: .
     container_name: reservation-secondary
-    command: java -cp /app/bin ReservationServer secondary 1245
+    command: java -cp /app/bin:/mysql-lib/mysql-connector-j-8.0.33.jar ReservationServer secondary 1245
     ports:
       - "1245:1245"
       - "2245:2245"
@@ -85,16 +238,26 @@ services:
       - TIME_SERVER_HOST=time-server
       - LD_PRELOAD=/usr/lib/x86_64-linux-gnu/faketime/libfaketime.so.1
       - FAKETIME=@2026-08-26 15:30:05
+      # Database connection (SECONDARY uses ev_reservation_secondary_db)
+      - DB_HOST=mysql-reservation-secondary
+      - DB_PORT=3306
+      - DB_NAME=ev_reservation_secondary_db
+      - DB_USER=root
+      - DB_PASSWORD=evroot
     depends_on:
-      - time-server
-      - charging-station
+      time-server:
+        condition: service_started
+      charging-station:
+        condition: service_started
+      mysql-reservation-secondary:
+        condition: service_healthy
     networks:
       - ev-rmi-network
 
   reservation-manager:
     build: .
     container_name: reservation-manager
-    command: java -cp /app/bin ReservationServerManager
+    command: java -cp /app/bin:/mysql-lib/mysql-connector-j-8.0.33.jar ReservationServerManager
     ports:
       - "1240:1240"
       - "2240:2240"
@@ -106,17 +269,21 @@ services:
       - TIME_SERVER_HOST=time-server
       - LD_PRELOAD=/usr/lib/x86_64-linux-gnu/faketime/libfaketime.so.1
       - FAKETIME=@2026-08-26 15:30:05
+      # Manager has no DB of its own — it is a stateless proxy
     depends_on:
-      - time-server
-      - reservation-primary
-      - reservation-secondary
+      time-server:
+        condition: service_started
+      reservation-primary:
+        condition: service_started
+      reservation-secondary:
+        condition: service_started
     networks:
       - ev-rmi-network
 
   charging-session:
     build: .
     container_name: charging-session
-    command: java -cp /app/bin ChargingSessionServer
+    command: java -cp /app/bin:/mysql-lib/mysql-connector-j-8.0.33.jar ChargingSessionServer
     ports:
       - "1236:1236"
       - "2236:2236"
@@ -129,17 +296,28 @@ services:
       - TIME_SERVER_HOST=time-server
       - LD_PRELOAD=/usr/lib/x86_64-linux-gnu/faketime/libfaketime.so.1
       - FAKETIME=@2026-08-26 15:29:55
+      # Database connection (ev_session_db)
+      - DB_HOST=mysql-session
+      - DB_PORT=3306
+      - DB_NAME=ev_session_db
+      - DB_USER=root
+      - DB_PASSWORD=evroot
     depends_on:
-      - time-server
-      - charging-station
-      - reservation-manager
+      time-server:
+        condition: service_started
+      charging-station:
+        condition: service_started
+      reservation-manager:
+        condition: service_started
+      mysql-session:
+        condition: service_healthy
     networks:
       - ev-rmi-network
 
   payment:
     build: .
     container_name: payment
-    command: java -cp /app/bin PaymentServer
+    command: java -cp /app/bin:/mysql-lib/mysql-connector-j-8.0.33.jar PaymentServer
     ports:
       - "1237:1237"
       - "2237:2237"
@@ -151,14 +329,42 @@ services:
       - TIME_SERVER_HOST=time-server
       - LD_PRELOAD=/usr/lib/x86_64-linux-gnu/faketime/libfaketime.so.1
       - FAKETIME=@2026-08-26 15:29:50
+      # Database connection (ev_payment_db)
+      - DB_HOST=mysql-payment
+      - DB_PORT=3306
+      - DB_NAME=ev_payment_db
+      - DB_USER=root
+      - DB_PASSWORD=evroot
     depends_on:
-      - time-server
-      - charging-station
-      - charging-session
-      - pricing
+      time-server:
+        condition: service_started
+      charging-station:
+        condition: service_started
+      charging-session:
+        condition: service_started
+      pricing:
+        condition: service_started
+      mysql-payment:
+        condition: service_healthy
     networks:
       - ev-rmi-network
+
+# ================================================================
+# NETWORKS
+# ================================================================
 
 networks:
   ev-rmi-network:
     driver: bridge
+
+# ================================================================
+# VOLUMES (named volumes ensure DB data survives container restarts)
+# ================================================================
+
+volumes:
+  station-db-data:
+  res-primary-db-data:
+  res-secondary-db-data:
+  session-db-data:
+  pricing-db-data:
+  payment-db-data:

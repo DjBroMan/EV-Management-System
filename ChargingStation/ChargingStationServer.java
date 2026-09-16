@@ -17,8 +17,42 @@ public class ChargingStationServer
     private String[] ports = { "P1", "P2", "P3", "P4" };
     private String[] portStatus = { "AVAILABLE", "AVAILABLE", "AVAILABLE", "AVAILABLE" };
 
+    // Database access object — null when DB is not configured or unavailable
+    private ChargingStationDAO dao = null;
+
     public ChargingStationServer() throws RemoteException {
         super(2234);
+    }
+
+    /**
+     * Connects to the MySQL database, self-seeds P1–P4 if the table is empty,
+     * and then loads current port statuses into the in-memory portStatus[] array.
+     * Safe to call even when DB is not configured: logs a warning and returns.
+     */
+    public void initWithDatabase() {
+        if (!DBConnectionHelper.isDatabaseConfigured()) {
+            System.out.println("[DB:ChargingStationServer] DB_HOST not set. Running without database persistence.");
+            return;
+        }
+        try {
+            this.dao = new ChargingStationDAO();
+            // Self-seed P1-P4 on first startup (Option A)
+            dao.initPortsIfEmpty(ports, portStatus, "EV-STATION-01",
+                    Clock.PhysicalClock.getSynchronizedPhysicalTimeMillis());
+            // Load current port statuses from DB into portStatus[]
+            java.util.Map<String, String> dbStatuses = dao.loadAllPorts();
+            for (int i = 0; i < ports.length; i++) {
+                String dbStatus = dbStatuses.get(ports[i]);
+                if (dbStatus != null) {
+                    portStatus[i] = dbStatus;
+                }
+            }
+            System.out.println("[DB:ChargingStationServer] Database initialized successfully.");
+        } catch (Exception e) {
+            System.out.println("[DB:ChargingStationServer] WARNING: Database init failed: " + e.getMessage()
+                    + ". Continuing without DB persistence.");
+            this.dao = null;
+        }
     }
 
     private void log(String message) {
@@ -200,6 +234,16 @@ public class ChargingStationServer
             result = "Port " + ports[i] + " reserved successfully.";
             logicalClock.tick();
             log("LOCAL", "Port " + ports[i] + " status changed to RESERVED.");
+            final String reservedPortId = ports[i];
+            if (dao != null) {
+                try {
+                    dao.updatePortStatus(reservedPortId, "RESERVED",
+                            Clock.PhysicalClock.getSynchronizedPhysicalTimeMillis());
+                } catch (Exception dbEx) {
+                    log("LOCAL", "[DB] WARNING: Failed to persist RESERVED status for port " + reservedPortId
+                            + ": " + dbEx.getMessage());
+                }
+            }
         }
 
         long sendL = logicalClock.sendEvent();
@@ -234,6 +278,16 @@ public class ChargingStationServer
             result = "Port " + ports[i] + " released successfully. Now AVAILABLE.";
             logicalClock.tick();
             log("LOCAL", "Port " + portId + " status changed to AVAILABLE.");
+            final String releasedPortId = ports[i];
+            if (dao != null) {
+                try {
+                    dao.updatePortStatus(releasedPortId, "AVAILABLE",
+                            Clock.PhysicalClock.getSynchronizedPhysicalTimeMillis());
+                } catch (Exception dbEx) {
+                    log("LOCAL", "[DB] WARNING: Failed to persist AVAILABLE status for port " + releasedPortId
+                            + ": " + dbEx.getMessage());
+                }
+            }
         }
 
         long sendL = logicalClock.sendEvent();
@@ -263,10 +317,20 @@ public class ChargingStationServer
                 portStatus[i] = "RESERVED";
                 logicalClock.tick();
                 log("LOCAL", "Allocated available port " + ports[i] + " -> RESERVED");
+                final String allocatedPortId = ports[i];
+                if (dao != null) {
+                    try {
+                        dao.updatePortStatus(allocatedPortId, "RESERVED",
+                                Clock.PhysicalClock.getSynchronizedPhysicalTimeMillis());
+                    } catch (Exception dbEx) {
+                        log("LOCAL", "[DB] WARNING: Failed to persist RESERVED status for port " + allocatedPortId
+                                + ": " + dbEx.getMessage());
+                    }
+                }
 
                 long sendL = logicalClock.sendEvent();
-                log("SEND", "Returning allocated port " + ports[i] + " (Lamport: " + sendL + ")");
-                return new LamportResult<>(ports[i], sendL);
+                log("SEND", "Returning allocated port " + allocatedPortId + " (Lamport: " + sendL + ")");
+                return new LamportResult<>(allocatedPortId, sendL);
             }
         }
 
@@ -307,6 +371,15 @@ public class ChargingStationServer
             result = "CHARGING_STARTED";
             logicalClock.tick();
             log("LOCAL", "Port " + portId + " status changed to CHARGING.");
+            if (dao != null) {
+                try {
+                    dao.updatePortStatus(portId, "CHARGING",
+                            Clock.PhysicalClock.getSynchronizedPhysicalTimeMillis());
+                } catch (Exception dbEx) {
+                    log("LOCAL", "[DB] WARNING: Failed to persist CHARGING status for port " + portId
+                            + ": " + dbEx.getMessage());
+                }
+            }
         }
 
         long sendL = logicalClock.sendEvent();
@@ -331,6 +404,9 @@ public class ChargingStationServer
             LocateRegistry.createRegistry(1234);
 
             ChargingStationServer server = new ChargingStationServer();
+
+            // Initialize database: self-seed ports if empty, load statuses from DB
+            server.initWithDatabase();
 
             Naming.bind(HOST, server);
 

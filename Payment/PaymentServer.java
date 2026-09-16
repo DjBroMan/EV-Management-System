@@ -33,6 +33,9 @@ public class PaymentServer
     private PricingInterface pricing;
     private ChargingStationInterface chargingStation;
 
+    // Database access object — null when DB is not configured or unavailable
+    private PaymentDAO dao = null;
+
     // Constructor with ChargingStationInterface
     public PaymentServer(
             ChargingSessionInterface chargingSession,
@@ -56,6 +59,30 @@ public class PaymentServer
             throws RemoteException {
 
         this(chargingSession, pricing, null);
+    }
+
+    /**
+     * Connects to MySQL, loads all existing payment records into the in-memory maps,
+     * and recovers paymentCounter from MAX(payment_id).
+     */
+    public void initWithDatabase() {
+        if (!DBConnectionHelper.isDatabaseConfigured()) {
+            System.out.println("[DB:PaymentServer] DB_HOST not set. Running without database persistence.");
+            return;
+        }
+        try {
+            this.dao = new PaymentDAO();
+            dao.loadAllPayments(paymentStatus, paymentDetails);
+            int maxCounter = dao.getMaxCounter();
+            if (maxCounter >= paymentCounter) {
+                paymentCounter = maxCounter + 1;
+            }
+            System.out.println("[DB:PaymentServer] Database initialized. Counter set to " + paymentCounter);
+        } catch (Exception e) {
+            System.out.println("[DB:PaymentServer] WARNING: Database init failed: " + e.getMessage()
+                    + ". Continuing without DB persistence.");
+            this.dao = null;
+        }
     }
 
     private void log(String message) {
@@ -241,6 +268,18 @@ public class PaymentServer
             log("LOCAL", "Payment " + paymentId + " stored successfully.");
         }
 
+        // PERSIST to database
+        if (dao != null) {
+            try {
+                dao.insertPayment(paymentId, sessionId, STATION_ID, energy, amount,
+                        PhysicalClock.getSynchronizedPhysicalTimeMillis());
+                log("LOCAL", "[DB] Payment " + paymentId + " persisted to database.");
+            } catch (Exception dbEx) {
+                log("LOCAL", "[DB] WARNING: Failed to persist payment " + paymentId
+                        + ": " + dbEx.getMessage());
+            }
+        }
+
         String result = "Payment Successful!\n" + details;
         long respL = logicalClock.sendEvent();
         log("SEND", "Returning MAKE PAYMENT response to client (Lamport: " + respL + ")");
@@ -270,7 +309,22 @@ public class PaymentServer
 
         synchronized (this) {
             if (!paymentStatus.containsKey(paymentId)) {
-                log("LOCAL", "Payment not found: " + paymentId);
+                log("LOCAL", "Payment not found in memory: " + paymentId + ". Querying DB...");
+                // DB fallback
+                if (dao != null) {
+                    try {
+                        String dbStatus = dao.queryPaymentStatus(paymentId);
+                        if (dbStatus != null) {
+                            logicalClock.tick();
+                            String result = "Payment ID: " + paymentId + "\nPayment Status: " + dbStatus;
+                            long respL = logicalClock.sendEvent();
+                            log("SEND", "Returning GET PAYMENT STATUS response from DB (Lamport: " + respL + ")");
+                            return new LamportResult<>(result, respL);
+                        }
+                    } catch (Exception dbEx) {
+                        log("LOCAL", "[DB] WARNING: DB fallback query failed: " + dbEx.getMessage());
+                    }
+                }
                 long respL = logicalClock.sendEvent();
                 return new LamportResult<>("Payment not found.", respL);
             }
@@ -308,7 +362,21 @@ public class PaymentServer
 
         synchronized (this) {
             if (!paymentDetails.containsKey(paymentId)) {
-                log("LOCAL", "Payment details not found: " + paymentId);
+                log("LOCAL", "Payment details not found in memory: " + paymentId + ". Querying DB...");
+                // DB fallback
+                if (dao != null) {
+                    try {
+                        String dbDetails = dao.queryPaymentDetails(paymentId);
+                        if (dbDetails != null) {
+                            logicalClock.tick();
+                            long respL = logicalClock.sendEvent();
+                            log("SEND", "Returning GET PAYMENT DETAILS response from DB (Lamport: " + respL + ")");
+                            return new LamportResult<>(dbDetails, respL);
+                        }
+                    } catch (Exception dbEx) {
+                        log("LOCAL", "[DB] WARNING: DB fallback query failed: " + dbEx.getMessage());
+                    }
+                }
                 long respL = logicalClock.sendEvent();
                 return new LamportResult<>("Payment not found.", respL);
             }
@@ -431,6 +499,9 @@ public class PaymentServer
             }
 
             PaymentServer server = new PaymentServer(chargingSession, pricing, chargingStation);
+
+            // Initialize database: load existing payments, recover counter
+            server.initWithDatabase();
 
             LocateRegistry.createRegistry(1237);
 
