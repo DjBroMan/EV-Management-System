@@ -26,17 +26,15 @@ public class MultithreadTest {
         return (host != null && !host.trim().isEmpty()) ? host.trim() : defaultHost;
     }
 
-    private static final String RESERVATION_URL =
-            "rmi://" + getEnvHost("MANAGER_HOST", getEnvHost("RESERVATION_HOST", "localhost")) + ":1240/ReservationService";
+    // All 5 services are now reached exclusively through the Manager --
+    // the single entry point -- rather than hardcoded per-service ports.
+    private static final String MANAGER_BASE =
+            "rmi://" + getEnvHost("MANAGER_HOST", "localhost") + ":" + getEnvHost("MANAGER_PORT", "1240") + "/";
 
-    private static final String SESSION_URL =
-            "rmi://" + getEnvHost("SESSION_HOST", "localhost") + ":1236/ChargingSessionServer";
-
-    private static final String PAYMENT_URL =
-            "rmi://" + getEnvHost("PAYMENT_HOST", "localhost") + ":1237/PaymentServer";
-
-    private static final String PRICING_URL =
-            "rmi://" + getEnvHost("PRICING_HOST", "localhost") + ":1238/PricingService";
+    private static final String RESERVATION_URL = MANAGER_BASE + "ReservationService";
+    private static final String SESSION_URL = MANAGER_BASE + "ChargingSessionService";
+    private static final String PAYMENT_URL = MANAGER_BASE + "PaymentService";
+    private static final String PRICING_URL = MANAGER_BASE + "PricingService";
 
     public static void main(String[] args) {
 
@@ -44,10 +42,9 @@ public class MultithreadTest {
             java.rmi.server.RMISocketFactory.setSocketFactory(new java.rmi.server.RMISocketFactory() {
                 @Override
                 public java.net.Socket createSocket(String host, int port) throws java.io.IOException {
-                    if ("charging-station".equals(host) || "reservation".equals(host) ||
-                        "reservation-primary".equals(host) || "reservation-secondary".equals(host) ||
-                        "reservation-manager".equals(host) || "charging-session".equals(host) ||
-                        "pricing".equals(host) || "payment".equals(host) || "time-server".equals(host)) {
+                    if (host != null && (host.startsWith("charging-station") || host.startsWith("reservation")
+                            || host.startsWith("charging-session") || host.startsWith("pricing")
+                            || host.startsWith("payment") || "time-server".equals(host) || "manager".equals(host))) {
                         host = "localhost";
                     }
                     return new java.net.Socket(host, port);

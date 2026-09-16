@@ -17,7 +17,6 @@ hs_err_pid*
 target/
 build/
 out/
-docs/
 
 # IDE files - IntelliJ IDEA
 .idea/

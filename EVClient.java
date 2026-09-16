@@ -29,10 +29,10 @@ public class EVClient {
             java.rmi.server.RMISocketFactory.setSocketFactory(new java.rmi.server.RMISocketFactory() {
                 @Override
                 public java.net.Socket createSocket(String host, int port) throws java.io.IOException {
-                    if ("charging-station".equals(host) || "reservation".equals(host) ||
-                        "reservation-primary".equals(host) || "reservation-secondary".equals(host) ||
-                        "reservation-manager".equals(host) || "charging-session".equals(host) ||
-                        "pricing".equals(host) || "payment".equals(host) || "time-server".equals(host)) {
+                    if (host != null && (host.startsWith("charging-station") || host.startsWith("reservation")
+                            || host.startsWith("charging-session") || host.startsWith("pricing")
+                            || host.startsWith("payment") || "time-server".equals(host)
+                            || "ev-manager".equals(host))) {
                         host = "localhost";
                     }
                     return new java.net.Socket(host, port);
@@ -122,42 +122,46 @@ public class EVClient {
         return (host != null && !host.trim().isEmpty()) ? host.trim() : defaultHost;
     }
 
-    private static ChargingStationInterface lookupChargingStation() throws Exception {
-        return (ChargingStationInterface) Naming.lookup(
-                "rmi://" + getEnvHost("STATION_HOST", "localhost") + ":1234//ChargingStationServer"
-        );
+    // EVClient is a pure client: the Manager (default port 1240) is now the
+    // SINGLE entry point for all 5 services. EVClient never needs to know
+    // which backend instance is currently the leader, nor which instance a
+    // read gets load-balanced to -- the Manager handles both concerns.
+    private static String managerHost() {
+        return getEnvHost("MANAGER_HOST", "localhost");
     }
 
-    private static ReservationInterface lookupReservation() throws Exception {
-        String host = getEnvHost("MANAGER_HOST", getEnvHost("RESERVATION_HOST", "localhost"));
-        int port = 1240;
+    private static int managerPort() {
         String portStr = System.getenv("MANAGER_PORT");
         if (portStr != null && !portStr.trim().isEmpty()) {
             try {
-                port = Integer.parseInt(portStr.trim());
+                return Integer.parseInt(portStr.trim());
             } catch (NumberFormatException ignored) {}
         }
-        return (ReservationInterface) Naming.lookup(
-                "rmi://" + host + ":" + port + "/ReservationService"
-        );
+        return 1240;
+    }
+
+    private static String managerUrl(String boundName) {
+        return "rmi://" + managerHost() + ":" + managerPort() + "/" + boundName;
+    }
+
+    private static ChargingStationInterface lookupChargingStation() throws Exception {
+        return (ChargingStationInterface) Naming.lookup(managerUrl("ChargingStationService"));
+    }
+
+    private static ReservationInterface lookupReservation() throws Exception {
+        return (ReservationInterface) Naming.lookup(managerUrl("ReservationService"));
     }
 
     private static ChargingSessionInterface lookupChargingSession() throws Exception {
-        return (ChargingSessionInterface) Naming.lookup(
-                "rmi://" + getEnvHost("SESSION_HOST", "localhost") + ":1236/ChargingSessionServer"
-        );
+        return (ChargingSessionInterface) Naming.lookup(managerUrl("ChargingSessionService"));
     }
 
     private static PaymentInterface lookupPayment() throws Exception {
-        return (PaymentInterface) Naming.lookup(
-                "rmi://" + getEnvHost("PAYMENT_HOST", "localhost") + ":1237/PaymentServer"
-        );
+        return (PaymentInterface) Naming.lookup(managerUrl("PaymentService"));
     }
 
     private static PricingInterface lookupPricing() throws Exception {
-        return (PricingInterface) Naming.lookup(
-                "rmi://" + getEnvHost("PRICING_HOST", "localhost") + ":1238/PricingService"
-        );
+        return (PricingInterface) Naming.lookup(managerUrl("PricingService"));
     }
 
     // ---------------------------------------------------------------
@@ -445,18 +449,18 @@ public class EVClient {
     }
 
     private static void stationUnavailable() {
-        System.out.println("\nCharging Station Server unavailable.\nPlease start the ChargingStationServer first.");
+        System.out.println("\nCharging Station Server unavailable.\nPlease start the Manager and ChargingStation cluster first.");
     }
     private static void reservationUnavailable() {
-        System.out.println("\nReservation Server unavailable.\nPlease start the ReservationServer first.");
+        System.out.println("\nReservation Server unavailable.\nPlease start the Manager and Reservation cluster first.");
     }
     private static void sessionUnavailable() {
-        System.out.println("\nCharging Session Server unavailable.\nPlease start the ChargingSessionServer first.");
+        System.out.println("\nCharging Session Server unavailable.\nPlease start the Manager and ChargingSession cluster first.");
     }
     private static void pricingUnavailable() {
-        System.out.println("\nPricing Server unavailable.\nPlease start the PricingServer first.");
+        System.out.println("\nPricing Server unavailable.\nPlease start the Manager and Pricing cluster first.");
     }
     private static void paymentUnavailable() {
-        System.out.println("\nPayment Server unavailable.\nPlease start the PaymentServer first.");
+        System.out.println("\nPayment Server unavailable.\nPlease start the Manager and Payment cluster first.");
     }
 }

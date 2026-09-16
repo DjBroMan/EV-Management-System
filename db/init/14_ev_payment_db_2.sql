@@ -1,0 +1,24 @@
+-- ============================================================
+-- EV Payment Database -- Instance 2 (PaymentServer-2, :1247)
+-- ============================================================
+-- Identical schema to ev_payment_db.
+-- ============================================================
+
+CREATE DATABASE IF NOT EXISTS ev_payment_db_2
+    CHARACTER SET utf8mb4
+    COLLATE utf8mb4_unicode_ci;
+
+USE ev_payment_db_2;
+
+CREATE TABLE IF NOT EXISTS payments (
+    payment_id           VARCHAR(32)    NOT NULL,
+    session_id           VARCHAR(32)    NOT NULL,
+    station_id           VARCHAR(32)    NOT NULL DEFAULT 'S01',
+    energy_consumed_kwh  DECIMAL(10,4)  NOT NULL,
+    total_amount         DECIMAL(10,2)  NOT NULL,
+    payment_status       VARCHAR(20)    NOT NULL DEFAULT 'SUCCESS',
+    payment_time         TIMESTAMP      NOT NULL,
+    PRIMARY KEY (payment_id),
+    INDEX idx_session_id     (session_id),
+    INDEX idx_payment_status (payment_status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

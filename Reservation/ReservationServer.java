@@ -10,11 +10,25 @@ import Clock.PhysicalClock;
 import Clock.CristianClient;
 import Clock.DistributedLogger;
 import Clock.LamportResult;
+import Common.ServerIdentity;
+import Common.PeerHandle;
+import Common.BullyElection;
+import Common.ClusterNodeInterface;
+import Common.StateDelta;
+import Common.GenericSnapshot;
+import java.util.HashMap;
 
 // RMI Server class that implements both ReservationInterface and ReservationReplicationInterface
 // Supports both PRIMARY and SECONDARY roles using the same implementation.
+//
+// The original 2-node (Primary :1235 / Secondary :1245) replication path via
+// ReservationReplicationInterface + ReservationServerManager is preserved
+// completely unchanged below, so existing ReplicationTest scenarios keep
+// passing exactly as before. ClusterNodeInterface is layered on top so a
+// 3rd node (and beyond) can participate in a real per-cluster Bully
+// election alongside R1/R2, per the distributed-system roadmap.
 public class ReservationServer extends UnicastRemoteObject
-        implements ReservationInterface, ReservationReplicationInterface {
+        implements ReservationInterface, ReservationReplicationInterface, ClusterNodeInterface {
 
     private static final long serialVersionUID = 1L;
 
@@ -29,6 +43,13 @@ public class ReservationServer extends UnicastRemoteObject
     private final String serverName;
 
     private final LogicalClock logicalClock = new LogicalClock();
+
+    // Bully election membership -- optional; only populated when the server
+    // is started via ServerIdentity.fromEnvironment() with SERVER_ID/PEERS
+    // set (the 3-node-and-beyond path). The original 2-node primary/backup
+    // fields above keep working even when this is null.
+    private ServerIdentity identity;
+    private BullyElection election;
 
     // In-memory state: reservation ID -> reservation details string
     private final Map<String, String> reservations = new HashMap<>();
@@ -173,18 +194,24 @@ public class ReservationServer extends UnicastRemoteObject
         }
     }
 
+    /**
+     * Resolves the ChargingStation endpoint to connect to. Since the
+     * ChargingStation cluster now has N instances with a Bully-elected
+     * leader (no single instance is guaranteed to keep answering at a fixed
+     * port), the default path routes through the Manager's load-balanced
+     * "ChargingStationService" proxy, exactly like every other cross-service
+     * call in the system. STATION_URL remains available as an explicit
+     * override for direct single-instance manual testing.
+     */
+    static String resolveStationUrl() {
+        return Common.ManagerRouting.resolveChargingStationUrl();
+    }
+
     private void ensureChargingStationConnected() {
         if (this.chargingStation != null)
             return;
 
-        String stationUrl = System.getenv("STATION_URL");
-        if (stationUrl == null || stationUrl.trim().isEmpty()) {
-            String stationHost = System.getenv("STATION_HOST");
-            if (stationHost == null || stationHost.trim().isEmpty()) {
-                stationHost = "localhost";
-            }
-            stationUrl = "rmi://" + stationHost + ":1234//ChargingStationServer";
-        }
+        String stationUrl = resolveStationUrl();
 
         try {
             this.chargingStation = (ChargingStationInterface) Naming.lookup(stationUrl);
@@ -743,6 +770,139 @@ public class ReservationServer extends UnicastRemoteObject
     }
 
     // =========================================================
+    // BULLY ELECTION (3-node-and-beyond cluster membership)
+    // =========================================================
+
+    /**
+     * Wires up an independent Bully election for the Reservation cluster.
+     * Only called when this instance was started with SERVER_ID/PEERS set
+     * (see main()); the original hardcoded 2-node Manager-driven failover
+     * continues to work unchanged for R1/R2 regardless of whether this is
+     * active, since promoteToPrimary()/getRole() are shared by both paths.
+     */
+    public void initCluster(ServerIdentity identity, String selfHost) {
+        this.identity = identity;
+        java.util.List<PeerHandle> peers = identity.peers;
+        int maxId = identity.serverId;
+        PeerHandle initialLeader = null;
+        for (PeerHandle p : peers) {
+            if (p.id > maxId) {
+                maxId = p.id;
+                initialLeader = p;
+            }
+        }
+        this.role = (initialLeader == null) ? Role.PRIMARY : Role.SECONDARY;
+
+        election = new BullyElection(identity.serverId, identity.serviceName, peers, logicalClock,
+                this::log,
+                () -> {
+                    this.role = Role.PRIMARY;
+                    ensureChargingStationConnected();
+                    log("BULLY", "This instance is now PRIMARY (coordinator) of the Reservation cluster.");
+                },
+                (leader) -> { this.role = Role.SECONDARY; log("BULLY", "Learned new coordinator: Reservation-" + leader.id); });
+
+        election.setSelfEndpoint(selfHost, identity.registryPort);
+        if (initialLeader != null) {
+            election.setInitialCoordinator(initialLeader);
+        }
+        log("LOCAL", "Bully cluster initialized. Server ID=" + identity.serverId + ", Initial Role=" + role
+                + ", Peers=" + peers);
+        election.startHeartbeatMonitor();
+    }
+
+    // =========================================================
+    // ClusterNodeInterface (generic replication/election surface, used
+    // alongside the typed ReservationReplicationInterface above)
+    // =========================================================
+
+    @Override
+    public synchronized LamportResult<Boolean> applyUpdate(StateDelta delta, long clientLamport) throws RemoteException {
+        long recvL = logicalClock.receiveEvent(clientLamport);
+        log("RECEIVE", "REPLICATION_RECEIVED (cluster): " + delta + " (Lamport: " + clientLamport + "). Clock updated to " + recvL);
+        if ("RESERVATION_UPSERT".equals(delta.opType) && delta.args.length == 4) {
+            String resId = (String) delta.args[0];
+            String details = (String) delta.args[1];
+            String portId = (String) delta.args[2];
+            int counter = (Integer) delta.args[3];
+            reservations.put(resId, details);
+            reservationPorts.put(resId, portId);
+            if (counter >= reservationCounter) reservationCounter = counter + 1;
+            if (dao != null) {
+                try {
+                    String userId = extractFromDetails(details, "User ID");
+                    String vehicleId = extractFromDetails(details, "Vehicle ID");
+                    dao.insertReservation(resId, userId, vehicleId, portId, PhysicalClock.getSynchronizedPhysicalTimeMillis());
+                } catch (Exception ignored) { }
+            }
+            log("LOCAL", "REPLICATION_APPLIED (cluster): " + resId + " -> " + portId);
+        } else if ("RESERVATION_DELETE".equals(delta.opType) && delta.args.length == 1) {
+            String resId = (String) delta.args[0];
+            reservations.remove(resId);
+            reservationPorts.remove(resId);
+            if (dao != null) {
+                try { dao.deleteReservation(resId); } catch (Exception ignored) { }
+            }
+            log("LOCAL", "REPLICATION_APPLIED (cluster): removed " + resId);
+        }
+        long respL = logicalClock.sendEvent();
+        return new LamportResult<>(true, respL);
+    }
+
+    @Override
+    public synchronized LamportResult<GenericSnapshot> getClusterSnapshot(long clientLamport) throws RemoteException {
+        long recvL = logicalClock.receiveEvent(clientLamport);
+        GenericSnapshot snap = new GenericSnapshot();
+        snap.put("reservations", new HashMap<>(reservations));
+        snap.put("reservationPorts", new HashMap<>(reservationPorts));
+        long respL = logicalClock.sendEvent();
+        return new LamportResult<>(snap, respL);
+    }
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public synchronized LamportResult<Boolean> applyClusterSnapshot(GenericSnapshot snapshot, long clientLamport) throws RemoteException {
+        long recvL = logicalClock.receiveEvent(clientLamport);
+        Map<String, String> restoredRes = snapshot.get("reservations");
+        Map<String, String> restoredPorts = snapshot.get("reservationPorts");
+        if (restoredRes != null) reservations.putAll(restoredRes);
+        if (restoredPorts != null) reservationPorts.putAll(restoredPorts);
+        log("LOCAL", "FULL_SYNC_APPLIED (cluster): restored " + (restoredRes == null ? 0 : restoredRes.size()) + " reservations.");
+        long respL = logicalClock.sendEvent();
+        return new LamportResult<>(true, respL);
+    }
+
+    @Override
+    public LamportResult<Integer> getServerId(long clientLamport) throws RemoteException {
+        long respL = logicalClock.sendEvent();
+        return new LamportResult<>(identity != null ? identity.serverId : -1, respL);
+    }
+
+    @Override
+    public LamportResult<Boolean> receiveElection(int candidateId, long clientLamport) throws RemoteException {
+        long recvL = logicalClock.receiveEvent(clientLamport);
+        boolean ok = election != null && election.handleElection(candidateId);
+        long respL = logicalClock.sendEvent();
+        return new LamportResult<>(ok, respL);
+    }
+
+    @Override
+    public LamportResult<Boolean> receiveOk(int fromId, long clientLamport) throws RemoteException {
+        long recvL = logicalClock.receiveEvent(clientLamport);
+        if (election != null) election.handleOk(fromId);
+        long respL = logicalClock.sendEvent();
+        return new LamportResult<>(true, respL);
+    }
+
+    @Override
+    public LamportResult<Boolean> receiveCoordinator(int leaderId, String leaderHost, int leaderRegistryPort, long clientLamport) throws RemoteException {
+        long recvL = logicalClock.receiveEvent(clientLamport);
+        if (election != null) election.handleCoordinator(leaderId, leaderHost, leaderRegistryPort);
+        long respL = logicalClock.sendEvent();
+        return new LamportResult<>(true, respL);
+    }
+
+    // =========================================================
     // MAIN ENTRY POINT
     // =========================================================
 
@@ -752,6 +912,7 @@ public class ReservationServer extends UnicastRemoteObject
             if (rmiHost != null && !rmiHost.trim().isEmpty()) {
                 System.setProperty("java.rmi.server.hostname", rmiHost);
             }
+            Common.NetworkSetup.installBoundedConnectTimeout();
 
             // Determine role and port from CLI arguments or environment variables
             Role role = Role.PRIMARY;
@@ -799,14 +960,7 @@ public class ReservationServer extends UnicastRemoteObject
 
             ChargingStationInterface chargingStation = null;
             if (role == Role.PRIMARY) {
-                String stationUrl = System.getenv("STATION_URL");
-                if (stationUrl == null || stationUrl.trim().isEmpty()) {
-                    String stationHost = System.getenv("STATION_HOST");
-                    if (stationHost == null || stationHost.trim().isEmpty()) {
-                        stationHost = "localhost";
-                    }
-                    stationUrl = "rmi://" + stationHost + ":1234//ChargingStationServer";
-                }
+                String stationUrl = resolveStationUrl();
 
                 int maxRetries = 10;
                 int retryCount = 0;
@@ -848,6 +1002,19 @@ public class ReservationServer extends UnicastRemoteObject
             Naming.rebind(serviceBindUrl, server);
             Naming.rebind(replBindUrl, server);
 
+            // Bully cluster membership (3-node-and-beyond). Only activates when
+            // SERVER_ID is present in the environment; R1/R2 started the classic
+            // way (primary/secondary CLI args only) skip this and keep behaving
+            // exactly as before.
+            String bindUrl = null;
+            if (System.getenv("SERVER_ID") != null && !System.getenv("SERVER_ID").trim().isEmpty()) {
+                ServerIdentity identity = ServerIdentity.fromEnvironment("Reservation", regPort, expPort, role.name());
+                String selfHost = (rmiHost != null && !rmiHost.trim().isEmpty()) ? rmiHost.trim() : "localhost";
+                server.initCluster(identity, selfHost);
+                bindUrl = "rmi://localhost:" + regPort + "/" + identity.serviceName + "-" + identity.serverId;
+                Naming.rebind(bindUrl, server);
+            }
+
             System.out.println("=================================================");
             System.out.println("   RESERVATION RMI SERVER [" + role + "]");
             System.out.println("=================================================");
@@ -856,6 +1023,9 @@ public class ReservationServer extends UnicastRemoteObject
             System.out.println("Export Port: " + expPort);
             System.out.println("Bound Service: " + serviceBindUrl);
             System.out.println("Bound Replication: " + replBindUrl);
+            if (bindUrl != null) {
+                System.out.println("Bound Cluster Node: " + bindUrl);
+            }
 
             try {
                 server.synchronizeClock();

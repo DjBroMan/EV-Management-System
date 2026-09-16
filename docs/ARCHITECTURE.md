@@ -1,5 +1,14 @@
 # EV Charging Network Management System — Architecture Overview
 
+> **Update:** this document describes the original single-instance-per-service
+> architecture. The system has since been extended to N-instance clusters
+> (3 per service) with Bully leader election, generalized replication, a
+> unified Manager, and load balancing. See
+> `docs/DISTRIBUTED_SYSTEM_ROADMAP.md` for the full as-built architecture,
+> and `docs/BULLY_ALGORITHM.md` / `docs/REPLICATION.md` / `docs/FAILOVER.md`
+> / `docs/LOAD_BALANCING.md` for each mechanism. The RMI, Lamport, and
+> Cristian material below remains accurate.
+
 ## Executive Summary
 This project implements a **Distributed EV Charging Network Management System** built with **Java RMI**, **Docker Compose**, **Lamport Logical Clocks**, **Cristian's Physical Clock Synchronization Algorithm**, **Real-Time Physical Session Duration Energy Calculation**, and **Primary-Backup In-Memory State Replication**.
 

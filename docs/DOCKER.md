@@ -1,5 +1,17 @@
 # EV Charging Network Management System — Comprehensive Docker & Clock Synchronization Guide
 
+> **Update:** the container list in Part A below predates the
+> distributed-system extension. `docker-compose.yml` now defines 32
+> services (1 TimeServer + 15 MySQL instances + 15 clustered app instances
+> + 1 Manager — 3 instances per one of the 5 service clusters, each with
+> its own database) instead of the single-instance-per-service layout
+> described here. The `libfaketime`/Cristian/Lamport material in Parts B-D
+> below is unchanged and still accurate. For the current container/port/DB
+> mapping see `docs/DATABASE_SCHEMA.md` and `docs/MANUAL_DEMONSTRATION.md`;
+> for the Bully/replication/failover/load-balancing mechanics layered on
+> top, see `docs/BULLY_ALGORITHM.md`, `docs/REPLICATION.md`,
+> `docs/FAILOVER.md`, and `docs/LOAD_BALANCING.md`.
+
 This document provides a detailed, production-grade guide covering **Docker Containerization**, **Container Networking**, **Physical Clock Simulation (`libfaketime`)**, **Cristian's Physical Clock Synchronization Algorithm**, **Lamport Logical Clocks**, and the **Real-Time Charging Session Duration & Energy Calculation Workflow**.
 
 ---

@@ -20,13 +20,15 @@ RUN mkdir -p /app/bin && \
     javac -cp /mysql-lib/mysql-connector-j-8.0.33.jar \
     -d /app/bin \
     Clock/*.java \
+    Common/*.java \
     ChargingStation/*.java \
     Reservation/*.java \
     ChargingSession/*.java \
     Pricing/*.java \
     Payment/*.java \
     DBConnectionHelper.java \
-    EVClient.java MultithreadTest.java ReplicationTest.java
+    EVClient.java MultithreadTest.java ReplicationTest.java \
+    tests/*.java
 
 # Runtime classpath: compiled classes + MySQL JDBC driver
 ENV CLASSPATH=/app/bin:/mysql-lib/mysql-connector-j-8.0.33.jar

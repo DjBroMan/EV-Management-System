@@ -2,6 +2,7 @@ import java.rmi.Naming;
 import java.rmi.RemoteException;
 import java.rmi.registry.LocateRegistry;
 import java.rmi.server.UnicastRemoteObject;
+import java.io.Serializable;
 import java.util.HashMap;
 import java.util.Map;
 import Clock.LogicalClock;
@@ -9,23 +10,40 @@ import Clock.PhysicalClock;
 import Clock.CristianClient;
 import Clock.DistributedLogger;
 import Clock.LamportResult;
+import Common.ServerIdentity;
+import Common.PeerHandle;
+import Common.BullyElection;
+import Common.ClusterNodeInterface;
+import Common.StateDelta;
+import Common.GenericSnapshot;
 
-// RMI Server implementation for dynamic EV charging price computation
+// RMI Server implementation for dynamic EV charging price computation.
+// Runs as one of N instances in the Pricing cluster (P1/P2/P3). Pricing
+// tariffs are not mutated by any client-facing call in this workflow, so
+// every instance is a read replica loaded independently from its own DB;
+// PRIMARY/SECONDARY role and Bully election are still implemented (per the
+// distributed-system roadmap) for cluster-membership/health/demo purposes,
+// but no write ever depends on which instance currently holds the role.
 public class PricingServer extends UnicastRemoteObject
-        implements PricingInterface {
+        implements PricingInterface, ClusterNodeInterface {
 
     private static final long serialVersionUID = 1L;
-    private static final String SERVER_NAME = "PricingServer";
-    private final LogicalClock logicalClock = new LogicalClock();
-
     private static final double BASE_PRICE = 10.0;
+
+    private final LogicalClock logicalClock = new LogicalClock();
+    private final ServerIdentity identity;
+    private volatile String role;
+    private BullyElection election;
+
     private Map<String, String> stationDemand;
 
     // Database access object — null when DB is not configured or unavailable
     private PricingDAO dao = null;
 
-    protected PricingServer() throws RemoteException {
-        super(2238);
+    protected PricingServer(ServerIdentity identity) throws RemoteException {
+        super(identity.exportPort);
+        this.identity = identity;
+        this.role = identity.role;
 
         stationDemand = new HashMap<>();
         stationDemand.put("S01", "LOW");
@@ -33,46 +51,73 @@ public class PricingServer extends UnicastRemoteObject
         stationDemand.put("S03", "HIGH");
     }
 
-    /**
-     * Connects to the MySQL database, self-seeds S01/S02/S03 from the
-     * hardcoded stationDemand map if the table is empty, then loads the
-     * stationDemand map from DB for subsequent startups.
-     */
+    private String serverName() {
+        return "PricingServer-" + identity.serverId + "[" + role + "]";
+    }
+
     public void initWithDatabase() {
         if (!DBConnectionHelper.isDatabaseConfigured()) {
-            System.out.println("[DB:PricingServer] DB_HOST not set. Running without database persistence.");
+            System.out.println("[DB:" + serverName() + "] DB_HOST not set. Running without database persistence.");
             return;
         }
-        java.sql.Connection probe = DBConnectionHelper.getConnectionWithRetry("PricingServer", 15);
+        java.sql.Connection probe = DBConnectionHelper.getConnectionWithRetry(serverName(), 15);
         if (probe == null) {
-            System.out.println("[DB:PricingServer] Could not connect to DB. Running without persistence.");
+            System.out.println("[DB:" + serverName() + "] Could not connect to DB. Running without persistence.");
             return;
         }
         try { probe.close(); } catch (Exception ignore) {}
         try {
             this.dao = new PricingDAO();
-            // Self-seed S01/S02/S03 on first startup (Option A)
             dao.initTariffsIfEmpty(stationDemand, BASE_PRICE);
-            // Load current tariffs from DB — overwrites hardcoded defaults
             Map<String, String> dbTariffs = dao.loadAllTariffs();
             if (!dbTariffs.isEmpty()) {
                 stationDemand = dbTariffs;
             }
-            System.out.println("[DB:PricingServer] Database initialized. Loaded "
+            System.out.println("[DB:" + serverName() + "] Database initialized. Loaded "
                     + stationDemand.size() + " tariff records.");
         } catch (Exception e) {
-            System.out.println("[DB:PricingServer] WARNING: Database init failed: " + e.getMessage()
+            System.out.println("[DB:" + serverName() + "] WARNING: Database init failed: " + e.getMessage()
                     + ". Continuing without DB persistence.");
             this.dao = null;
         }
     }
 
+    // ---------------------------------------------------------------
+    // Bully election + cluster membership wiring
+    // ---------------------------------------------------------------
+
+    public void initCluster(String selfHost) {
+        java.util.List<PeerHandle> peers = identity.peers;
+        int maxId = identity.serverId;
+        PeerHandle initialLeader = null;
+        for (PeerHandle p : peers) {
+            if (p.id > maxId) {
+                maxId = p.id;
+                initialLeader = p;
+            }
+        }
+        this.role = (initialLeader == null) ? "PRIMARY" : "SECONDARY";
+
+        election = new BullyElection(identity.serverId, identity.serviceName, peers, logicalClock,
+                this::log,
+                () -> { this.role = "PRIMARY"; log("BULLY", "This instance is now PRIMARY (coordinator) of the Pricing cluster."); },
+                (leader) -> { this.role = "SECONDARY"; log("BULLY", "Learned new coordinator: Pricing-" + leader.id); });
+
+        election.setSelfEndpoint(selfHost, identity.registryPort);
+        if (initialLeader != null) {
+            election.setInitialCoordinator(initialLeader);
+        }
+        log("LOCAL", "Cluster initialized. Server ID=" + identity.serverId + ", Initial Role=" + role
+                + ", Peers=" + peers);
+        election.startHeartbeatMonitor();
+    }
+
     private void log(String message) {
-        DistributedLogger.log(SERVER_NAME, logicalClock, message);
+        DistributedLogger.log(serverName(), logicalClock, message);
     }
 
     private void log(String eventType, String message) {
-        DistributedLogger.log(SERVER_NAME, logicalClock, eventType, message);
+        DistributedLogger.log(serverName(), logicalClock, eventType, message);
     }
 
     private void simulateProcessing(long milliseconds) {
@@ -93,7 +138,7 @@ public class PricingServer extends UnicastRemoteObject
             timeServerHost = "localhost";
         }
         String timeServerUrl = "rmi://" + timeServerHost + ":1239/TimeServer";
-        CristianClient.SyncResult res = CristianClient.synchronize(SERVER_NAME, timeServerUrl);
+        CristianClient.SyncResult res = CristianClient.synchronize(serverName(), timeServerUrl);
         logicalClock.tick();
         if (res.success) {
             log("LOCAL",
@@ -223,6 +268,97 @@ public class PricingServer extends UnicastRemoteObject
     }
 
     // =========================================================
+    // ClusterNodeInterface: replication + election + health
+    // =========================================================
+
+    @Override
+    public synchronized LamportResult<Boolean> applyUpdate(StateDelta delta, long clientLamport) throws RemoteException {
+        long recvL = logicalClock.receiveEvent(clientLamport);
+        log("RECEIVE", "REPLICATION_RECEIVED: " + delta + " (Lamport: " + clientLamport + "). Clock updated to " + recvL);
+        if ("DEMAND_UPDATE".equals(delta.opType) && delta.args.length == 2) {
+            stationDemand.put((String) delta.args[0], (String) delta.args[1]);
+            log("LOCAL", "REPLICATION_APPLIED: demand updated " + delta.args[0] + " -> " + delta.args[1]);
+        }
+        long respL = logicalClock.sendEvent();
+        return new LamportResult<>(true, respL);
+    }
+
+    @Override
+    public synchronized LamportResult<GenericSnapshot> getClusterSnapshot(long clientLamport) throws RemoteException {
+        long recvL = logicalClock.receiveEvent(clientLamport);
+        GenericSnapshot snap = new GenericSnapshot();
+        snap.put("stationDemand", new HashMap<>(stationDemand));
+        long respL = logicalClock.sendEvent();
+        return new LamportResult<>(snap, respL);
+    }
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public synchronized LamportResult<Boolean> applyClusterSnapshot(GenericSnapshot snapshot, long clientLamport) throws RemoteException {
+        long recvL = logicalClock.receiveEvent(clientLamport);
+        Map<String, String> restored = snapshot.get("stationDemand");
+        if (restored != null) {
+            stationDemand = new HashMap<>(restored);
+            log("LOCAL", "FULL_SYNC_APPLIED: restored " + stationDemand.size() + " tariff entries.");
+        }
+        long respL = logicalClock.sendEvent();
+        return new LamportResult<>(true, respL);
+    }
+
+    @Override
+    public LamportResult<Boolean> ping(long clientLamport) throws RemoteException {
+        long recvL = logicalClock.receiveEvent(clientLamport);
+        long respL = logicalClock.sendEvent();
+        return new LamportResult<>(true, respL);
+    }
+
+    @Override
+    public LamportResult<Boolean> promoteToPrimary(long clientLamport) throws RemoteException {
+        long recvL = logicalClock.receiveEvent(clientLamport);
+        this.role = "PRIMARY";
+        log("LOCAL", "ROLE_CHANGED: promoted to PRIMARY.");
+        long respL = logicalClock.sendEvent();
+        return new LamportResult<>(true, respL);
+    }
+
+    @Override
+    public LamportResult<String> getRole(long clientLamport) throws RemoteException {
+        long recvL = logicalClock.receiveEvent(clientLamport);
+        long respL = logicalClock.sendEvent();
+        return new LamportResult<>(role, respL);
+    }
+
+    @Override
+    public LamportResult<Integer> getServerId(long clientLamport) throws RemoteException {
+        long respL = logicalClock.sendEvent();
+        return new LamportResult<>(identity.serverId, respL);
+    }
+
+    @Override
+    public LamportResult<Boolean> receiveElection(int candidateId, long clientLamport) throws RemoteException {
+        long recvL = logicalClock.receiveEvent(clientLamport);
+        boolean ok = election.handleElection(candidateId);
+        long respL = logicalClock.sendEvent();
+        return new LamportResult<>(ok, respL);
+    }
+
+    @Override
+    public LamportResult<Boolean> receiveOk(int fromId, long clientLamport) throws RemoteException {
+        long recvL = logicalClock.receiveEvent(clientLamport);
+        election.handleOk(fromId);
+        long respL = logicalClock.sendEvent();
+        return new LamportResult<>(true, respL);
+    }
+
+    @Override
+    public LamportResult<Boolean> receiveCoordinator(int leaderId, String leaderHost, int leaderRegistryPort, long clientLamport) throws RemoteException {
+        long recvL = logicalClock.receiveEvent(clientLamport);
+        election.handleCoordinator(leaderId, leaderHost, leaderRegistryPort);
+        long respL = logicalClock.sendEvent();
+        return new LamportResult<>(true, respL);
+    }
+
+    // =========================================================
     // MAIN
     // =========================================================
 
@@ -232,21 +368,30 @@ public class PricingServer extends UnicastRemoteObject
             if (rmiHost != null && !rmiHost.trim().isEmpty()) {
                 System.setProperty("java.rmi.server.hostname", rmiHost);
             }
+            String selfHost = (rmiHost != null && !rmiHost.trim().isEmpty()) ? rmiHost.trim() : "localhost";
+            Common.NetworkSetup.installBoundedConnectTimeout();
 
-            System.out.println("Starting Pricing Server...");
+            ServerIdentity identity = ServerIdentity.fromEnvironment("PricingService", 1238, 2238, "PRIMARY");
 
-            LocateRegistry.createRegistry(1238);
+            System.out.println("Starting Pricing Server instance " + identity.serverId + "...");
 
-            PricingServer server = new PricingServer();
+            LocateRegistry.createRegistry(identity.registryPort);
 
-            // Initialize database: self-seed tariffs if empty, load from DB
+            PricingServer server = new PricingServer(identity);
             server.initWithDatabase();
+            server.initCluster(selfHost);
 
-            Naming.rebind("rmi://localhost:1238/PricingService", server);
+            String bindUrl = "rmi://localhost:" + identity.registryPort + "/" + identity.serviceName + "-" + identity.serverId;
+            Naming.rebind(bindUrl, server);
 
             System.out.println("=================================");
             System.out.println("       PRICING RMI SERVER");
             System.out.println("=================================");
+            System.out.println("Server ID: " + identity.serverId);
+            System.out.println("Role: " + server.role);
+            System.out.println("Registry Port: " + identity.registryPort);
+            System.out.println("Bound: " + bindUrl);
+            System.out.println("Peers: " + identity.peers);
 
             try {
                 server.synchronizeClock();
