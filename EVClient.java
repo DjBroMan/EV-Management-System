@@ -32,7 +32,7 @@ public class EVClient {
                     if (host != null && (host.startsWith("charging-station") || host.startsWith("reservation")
                             || host.startsWith("charging-session") || host.startsWith("pricing")
                             || host.startsWith("payment") || "time-server".equals(host)
-                            || "ev-manager".equals(host))) {
+                            || "manager".equals(host) || "ev-manager".equals(host))) {
                         host = "localhost";
                     }
                     return new java.net.Socket(host, port);
