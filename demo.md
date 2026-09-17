@@ -328,8 +328,10 @@ What to point out: 10 simulated EV clients run reserve → start → stop → pa
 
 **Explanation:** every RMI call carries a Lamport timestamp. Every log line already shows it as `[Lamport=N]`. The rule: on receiving a message, a server sets its clock to `max(its own clock, the received timestamp) + 1` — this creates a consistent causal ordering across independent processes that don't share a physical clock.
 
+This step traces a *single* request's causal chain, so grep across the services it actually touches rather than one container alone — a single-container view will otherwise mix in Step 10's 10 concurrent threads and look jumbled:
+
 ```powershell
-docker compose logs reservation-3 | Select-String "Lamport" | Select-Object -First 20
+docker compose logs manager reservation-1 reservation-2 reservation-3 charging-station-1 charging-station-2 charging-station-3 | Select-String "Lamport" | Select-Object -First 20
 ```
 
 **What to say:** "Watch the Lamport number strictly increase across a single request as it hops from the Manager to the Reservation leader to the ChargingStation cluster and back — that's the logical clock advancing on every send/receive, independent of wall-clock time."
