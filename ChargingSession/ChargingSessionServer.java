@@ -3,6 +3,11 @@ import java.rmi.server.*;
 import java.rmi.registry.*;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.time.Instant;
 import java.time.Duration;
 import java.time.ZoneId;
@@ -29,6 +34,8 @@ public class ChargingSessionServer
         implements ChargingSessionInterface, ClusterNodeInterface {
 
     private static final double DEFAULT_CHARGING_POWER_KW = 7.2;
+    private static final String STATION_ID = "S01";
+    private static final long BILLING_INTERVAL_SECONDS = 5;
 
     private static final DateTimeFormatter TIME_FORMATTER =
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS").withZone(ZoneId.systemDefault());
@@ -43,10 +50,18 @@ public class ChargingSessionServer
     private HashMap<String, Instant> sessionEndTimes;
     private HashMap<String, Double> sessionChargingPowers;
 
+    // Wallet billing: which user pays for a session, and when that session's
+    // energy consumption was last billed against their wallet.
+    private HashMap<String, String> sessionUserIds;
+    private HashMap<String, Instant> lastBillingCheckpoints;
+    private ScheduledExecutorService billingScheduler;
+
     private int sessionCounter = 1001;
 
     private ReservationInterface reservationServer;
     private ChargingStationInterface chargingStation;
+    private PaymentInterface payment;
+    private PricingInterface pricing;
 
     private final ServerIdentity identity;
     private volatile String role;
@@ -58,7 +73,9 @@ public class ChargingSessionServer
     public ChargingSessionServer(
             ServerIdentity identity,
             ReservationInterface reservationServer,
-            ChargingStationInterface chargingStation)
+            ChargingStationInterface chargingStation,
+            PaymentInterface payment,
+            PricingInterface pricing)
             throws RemoteException {
 
         super(identity.exportPort);
@@ -74,8 +91,13 @@ public class ChargingSessionServer
         sessionEndTimes = new HashMap<String, Instant>();
         sessionChargingPowers = new HashMap<String, Double>();
 
+        sessionUserIds = new HashMap<String, String>();
+        lastBillingCheckpoints = new HashMap<String, Instant>();
+
         this.reservationServer = reservationServer;
         this.chargingStation = chargingStation;
+        this.payment = payment;
+        this.pricing = pricing;
     }
 
     private String serverName() {
@@ -158,6 +180,21 @@ public class ChargingSessionServer
     private String formatInstant(Instant instant) {
         if (instant == null) return "N/A";
         return TIME_FORMATTER.format(instant);
+    }
+
+    // Reservation.getReservation returns a free-text sentence, e.g.
+    // "Reservation ID: R1001, User ID: USER1, Vehicle ID: EV1, Port: P1, Status: CONFIRMED"
+    // -- extract the userId token the same way the rest of this codebase
+    // parses these free-text responses (see PaymentServer.makePayment's
+    // "COMPLETED" substring check).
+    private String extractUserId(String reservationInfo) {
+        if (reservationInfo == null) return null;
+        int idx = reservationInfo.indexOf("User ID: ");
+        if (idx == -1) return null;
+        int start = idx + "User ID: ".length();
+        int end = reservationInfo.indexOf(",", start);
+        if (end == -1) end = reservationInfo.length();
+        return reservationInfo.substring(start, end).trim();
     }
 
     private boolean rejectIfSecondary(String opName) {
@@ -301,6 +338,7 @@ public class ChargingSessionServer
 
         Instant startTime = Instant.now();
         String sessionId;
+        String userId = extractUserId(reservationInfo);
 
         synchronized (this) {
             sessionId = "SESSION-" + sessionCounter++;
@@ -310,10 +348,15 @@ public class ChargingSessionServer
             sessionStartTimes.put(sessionId, startTime);
             sessionChargingPowers.put(sessionId, DEFAULT_CHARGING_POWER_KW);
             energyConsumed.put(sessionId, 0.0);
+            if (userId != null) {
+                sessionUserIds.put(sessionId, userId);
+                lastBillingCheckpoints.put(sessionId, startTime);
+            }
             logicalClock.tick();
             log("LOCAL", "Charging session " + sessionId + " started for Reservation " + reservationId
                     + " on Port " + portId + " at " + formatInstant(startTime)
-                    + " (Charging Power: " + DEFAULT_CHARGING_POWER_KW + " kW)");
+                    + " (Charging Power: " + DEFAULT_CHARGING_POWER_KW + " kW)"
+                    + (userId != null ? ", billed to Wallet[" + userId + "]" : ", WARNING: no userId found, wallet billing disabled for this session"));
         }
 
         persistStart(sessionId, reservationId, portId, startTime.toEpochMilli());
@@ -358,6 +401,20 @@ public class ChargingSessionServer
 
         simulateProcessing(400);
 
+        String result = stopChargingInternal(sessionId, "CLIENT_REQUESTED");
+
+        long respL = logicalClock.sendEvent();
+        log("SEND", "Returning STOP CHARGING response to client (Lamport: " + respL + ")");
+
+        return new LamportResult<>(result, respL);
+    }
+
+    // Shared stop logic used by both the client-invoked stopCharging RMI
+    // method above and the automatic stop triggered by the billing cycle
+    // below when a wallet's balance runs out. Lamport receive/response
+    // wrapping stays with each caller since only stopCharging is itself
+    // an RMI entry point -- this helper is a purely local operation.
+    private String stopChargingInternal(String sessionId, String reason) {
         String currentStatus;
         Instant startTime;
         double power;
@@ -365,8 +422,7 @@ public class ChargingSessionServer
         synchronized (this) {
             if (!sessionStatus.containsKey(sessionId)) {
                 log("LOCAL", "Session not found.");
-                long respL = logicalClock.sendEvent();
-                return new LamportResult<>("Session not found.", respL);
+                return "Session not found.";
             }
             currentStatus = sessionStatus.get(sessionId);
             startTime = sessionStartTimes.get(sessionId);
@@ -375,11 +431,8 @@ public class ChargingSessionServer
 
         if (currentStatus.equals("COMPLETED")) {
             log("LOCAL", "Session is already completed.");
-            long respL = logicalClock.sendEvent();
-            return new LamportResult<>("Charging session is already completed.", respL);
+            return "Charging session is already completed.";
         }
-
-        simulateProcessing(700);
 
         Instant endTime = Instant.now();
         long durationMillis = (startTime != null) ? Duration.between(startTime, endTime).toMillis() : 0;
@@ -396,7 +449,8 @@ public class ChargingSessionServer
             energyConsumed.put(sessionId, calculatedEnergy);
             sessionStatus.put(sessionId, "COMPLETED");
             logicalClock.tick();
-            log("LOCAL", "Session " + sessionId + " ENERGY CALCULATION: Start=" + formatInstant(startTime)
+            log("LOCAL", "Session " + sessionId + " STOPPED. Reason: " + reason
+                    + ". ENERGY CALCULATION: Start=" + formatInstant(startTime)
                     + ", End=" + formatInstant(endTime)
                     + ", Duration=" + String.format("%.3f", durationSeconds) + "s"
                     + ", Power=" + power + " kW"
@@ -406,7 +460,7 @@ public class ChargingSessionServer
         persistStop(sessionId, endTime.toEpochMilli(), calculatedEnergy);
         replicateStop(sessionId, endTime.toEpochMilli(), calculatedEnergy);
 
-        String result = "Charging Stopped Successfully!\n"
+        return "Charging Stopped Successfully!\n"
                 + "Session ID: " + sessionId + "\n"
                 + "Port: " + sessionPort.getOrDefault(sessionId, "UNKNOWN") + "\n"
                 + "Start Time: " + formatInstant(startTime) + "\n"
@@ -414,13 +468,8 @@ public class ChargingSessionServer
                 + "Charging Duration: " + String.format("%.3f", durationSeconds) + " seconds (" + String.format("%.4f", durationHours) + " hours)\n"
                 + "Charging Power: " + power + " kW\n"
                 + "Energy Consumed: " + String.format("%.4f", calculatedEnergy) + " kWh\n"
-                + "Status: COMPLETED\n"
+                + "Status: COMPLETED (" + reason + ")\n"
                 + "Note: Port will be released after successful payment.";
-
-        long respL = logicalClock.sendEvent();
-        log("SEND", "Returning STOP CHARGING response to client (Lamport: " + respL + ")");
-
-        return new LamportResult<>(result, respL);
     }
 
     // =========================================================
@@ -552,6 +601,105 @@ public class ChargingSessionServer
             long respL = logicalClock.sendEvent();
             log("SEND", "Returning GET ENERGY response (Lamport: " + respL + ")");
             return new LamportResult<>(energy, respL);
+        }
+    }
+
+    // =========================================================
+    // WALLET BILLING (periodic, self-initiated -- the mechanism that
+    // demonstrates cross-server Lamport clocks: this ScheduledExecutorService
+    // ticks independently of any client request and, every cycle, sends a
+    // fresh Lamport-stamped RMI call from this ChargingSession container
+    // into the Payment container's Bully-elected leader, then folds the
+    // Payment container's response Lamport value back into this clock.)
+    // =========================================================
+
+    public void startBillingScheduler() {
+        billingScheduler = Executors.newSingleThreadScheduledExecutor();
+        billingScheduler.scheduleAtFixedRate(this::runBillingCycle,
+                BILLING_INTERVAL_SECONDS, BILLING_INTERVAL_SECONDS, TimeUnit.SECONDS);
+        log("LOCAL", "Wallet billing scheduler started. Interval: " + BILLING_INTERVAL_SECONDS + "s.");
+    }
+
+    private void runBillingCycle() {
+        if (!"PRIMARY".equals(role)) {
+            return;
+        }
+
+        Set<String> chargingSessionIds;
+        synchronized (this) {
+            chargingSessionIds = new HashSet<>();
+            for (Map.Entry<String, String> e : sessionStatus.entrySet()) {
+                if ("CHARGING".equals(e.getValue()) && sessionUserIds.containsKey(e.getKey())) {
+                    chargingSessionIds.add(e.getKey());
+                }
+            }
+        }
+
+        for (String sessionId : chargingSessionIds) {
+            billSession(sessionId);
+        }
+    }
+
+    private void billSession(String sessionId) {
+        String userId;
+        double power;
+        Instant checkpoint;
+        Instant now = Instant.now();
+
+        synchronized (this) {
+            if (!"CHARGING".equals(sessionStatus.get(sessionId))) return;
+            userId = sessionUserIds.get(sessionId);
+            power = sessionChargingPowers.getOrDefault(sessionId, DEFAULT_CHARGING_POWER_KW);
+            checkpoint = lastBillingCheckpoints.getOrDefault(sessionId, sessionStartTimes.get(sessionId));
+        }
+        if (userId == null || checkpoint == null) return;
+
+        long intervalMillis = Duration.between(checkpoint, now).toMillis();
+        if (intervalMillis <= 0) return;
+        double energySinceCheckpoint = power * (intervalMillis / 1000.0 / 3600.0);
+
+        log("LOCAL", "BILLING_CYCLE: Session " + sessionId + " (User " + userId + ") consumed "
+                + String.format("%.5f", energySinceCheckpoint) + " kWh since last checkpoint.");
+
+        long sendL1 = logicalClock.sendEvent();
+        log("SEND", "Contacting PricingServer.calculatePrice for incremental billing, Session " + sessionId + ", Energy " + String.format("%.5f", energySinceCheckpoint) + " kWh (Lamport: " + sendL1 + ")");
+
+        double cost;
+        try {
+            LamportResult<Double> priceRes = pricing.calculatePrice(STATION_ID, energySinceCheckpoint, sendL1);
+            logicalClock.receiveEvent(priceRes.getTimestamp());
+            log("RECEIVE", "PricingServer calculatePrice response: Rs. " + priceRes.getData() + " (Pricing Lamport: " + priceRes.getTimestamp() + ")");
+            cost = priceRes.getData();
+            if (cost < 0) cost = 0;
+        } catch (RemoteException e) {
+            log("LOCAL", "WARNING: PricingServer unavailable during billing cycle: " + e.getMessage() + ". Skipping this cycle.");
+            return;
+        }
+
+        long sendL2 = logicalClock.sendEvent();
+        log("SEND", "Contacting PaymentServer.checkAndDeductBalance for User " + userId + ", Session " + sessionId + ", Amount Rs. " + String.format("%.2f", cost) + " (Lamport: " + sendL2 + ")");
+
+        String walletResult;
+        try {
+            LamportResult<String> deductRes = payment.checkAndDeductBalance(userId, cost, sessionId, sendL2);
+            logicalClock.receiveEvent(deductRes.getTimestamp());
+            log("RECEIVE", "PaymentServer checkAndDeductBalance response: " + deductRes.getData() + " (Payment Lamport: " + deductRes.getTimestamp() + ")");
+            walletResult = deductRes.getData();
+        } catch (RemoteException e) {
+            log("LOCAL", "WARNING: PaymentServer unavailable during billing cycle: " + e.getMessage() + ". Skipping this cycle (session continues).");
+            return;
+        }
+
+        if (walletResult != null && walletResult.startsWith("OK")) {
+            synchronized (this) {
+                lastBillingCheckpoints.put(sessionId, now);
+            }
+            logicalClock.tick();
+            log("BILLING_OK", "Session " + sessionId + " billed Rs. " + String.format("%.2f", cost) + " to User " + userId + ". " + walletResult);
+        } else {
+            logicalClock.tick();
+            log("INSUFFICIENT_BALANCE", "Session " + sessionId + " User " + userId + " has insufficient balance (" + walletResult + "). Auto-stopping charging session.");
+            stopChargingInternal(sessionId, "INSUFFICIENT_BALANCE");
         }
     }
 
@@ -787,15 +935,64 @@ public class ChargingSessionServer
                 return;
             }
 
+            String paymentUrl = Common.ManagerRouting.resolvePaymentUrl();
+
+            PaymentInterface payment = null;
+            retryCount = 0;
+
+            System.out.println("Connecting to PaymentServer at " + paymentUrl + "...");
+
+            while (retryCount < maxRetries) {
+                try {
+                    payment = (PaymentInterface) Naming.lookup(paymentUrl);
+                    System.out.println("PaymentServer connected.");
+                    break;
+                } catch (Exception e) {
+                    retryCount++;
+                    System.out.println("Waiting for PaymentServer... Retry " + retryCount + "/" + maxRetries + "...");
+                    try { Thread.sleep(2000); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
+                }
+            }
+
+            if (payment == null) {
+                System.out.println("Could not connect to PaymentServer.");
+                return;
+            }
+
+            String pricingUrl = Common.ManagerRouting.resolvePricingUrl();
+
+            PricingInterface pricing = null;
+            retryCount = 0;
+
+            System.out.println("Connecting to PricingServer at " + pricingUrl + "...");
+
+            while (retryCount < maxRetries) {
+                try {
+                    pricing = (PricingInterface) Naming.lookup(pricingUrl);
+                    System.out.println("PricingServer connected.");
+                    break;
+                } catch (Exception e) {
+                    retryCount++;
+                    System.out.println("Waiting for PricingServer... Retry " + retryCount + "/" + maxRetries + "...");
+                    try { Thread.sleep(2000); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
+                }
+            }
+
+            if (pricing == null) {
+                System.out.println("Could not connect to PricingServer.");
+                return;
+            }
+
             ServerIdentity identity = ServerIdentity.fromEnvironment("ChargingSessionService", 1236, 2236, "PRIMARY");
 
-            ChargingSessionServer server = new ChargingSessionServer(identity, reservationServer, chargingStation);
+            ChargingSessionServer server = new ChargingSessionServer(identity, reservationServer, chargingStation, payment, pricing);
             server.initWithDatabase();
             server.setManagerClient(new ClusterManagerClient());
 
             LocateRegistry.createRegistry(identity.registryPort);
 
             server.initCluster(selfHost);
+            server.startBillingScheduler();
 
             String bindUrl = "rmi://localhost:" + identity.registryPort + "/" + identity.serviceName + "-" + identity.serverId;
             Naming.rebind(bindUrl, server);

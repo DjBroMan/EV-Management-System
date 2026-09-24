@@ -1042,6 +1042,36 @@ public class ReservationServerManager extends UnicastRemoteObject
         return proxyRead("Payment", (PaymentInterface s) -> s.getPaymentDetails(paymentId, clientLamport), "Payment not found.");
     }
 
+    // ---- Wallet (PaymentInterface) proxy ----
+
+    @Override
+    public String addFunds(String userId, double amount) throws RemoteException { return addFunds(userId, amount, 0).getData(); }
+
+    @Override
+    public LamportResult<String> addFunds(String userId, double amount, long clientLamport) throws RemoteException {
+        return proxyWrite("Payment", (PaymentInterface s) -> s.addFunds(userId, amount, clientLamport),
+                "Add funds failed: Payment cluster is unavailable.");
+    }
+
+    @Override
+    public double getWalletBalance(String userId) throws RemoteException { return getWalletBalance(userId, 0).getData(); }
+
+    @Override
+    public LamportResult<Double> getWalletBalance(String userId, long clientLamport) throws RemoteException {
+        return proxyReadDouble("Payment", (PaymentInterface s) -> s.getWalletBalance(userId, clientLamport), -1.0);
+    }
+
+    @Override
+    public String checkAndDeductBalance(String userId, double amount, String sessionId) throws RemoteException {
+        return checkAndDeductBalance(userId, amount, sessionId, 0).getData();
+    }
+
+    @Override
+    public LamportResult<String> checkAndDeductBalance(String userId, double amount, String sessionId, long clientLamport) throws RemoteException {
+        return proxyWrite("Payment", (PaymentInterface s) -> s.checkAndDeductBalance(userId, amount, sessionId, clientLamport),
+                "INSUFFICIENT|0.0");
+    }
+
     // ---- Generic proxy helpers ----
 
     @FunctionalInterface private interface StringCall<S> { LamportResult<String> call(S stub) throws RemoteException; }

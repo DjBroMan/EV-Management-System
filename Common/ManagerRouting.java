@@ -51,6 +51,14 @@ public class ManagerRouting {
         return managerBase() + "PricingService";
     }
 
+    public static String resolvePaymentUrl() {
+        String explicit = getEnv("PAYMENT_URL");
+        if (explicit != null) return explicit;
+        String host = getEnv("PAYMENT_HOST");
+        if (host != null) return "rmi://" + host + ":1237/PaymentService";
+        return managerBase() + "PaymentService";
+    }
+
     public static String resolveReservationUrl() {
         String explicit = getEnv("RESERVATION_URL");
         if (explicit != null) return explicit;

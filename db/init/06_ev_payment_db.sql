@@ -29,3 +29,12 @@ CREATE TABLE IF NOT EXISTS payments (
     INDEX idx_session_id     (session_id),
     INDEX idx_payment_status (payment_status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Wallet balances, credited via addFunds and debited via checkAndDeductBalance
+-- during mid-session billing (ChargingSessionServer -> PaymentServer RMI calls).
+CREATE TABLE IF NOT EXISTS wallets (
+    user_id       VARCHAR(32)    NOT NULL,
+    balance       DECIMAL(10,2)  NOT NULL DEFAULT 0.00,
+    last_updated  TIMESTAMP      NOT NULL,
+    PRIMARY KEY (user_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

@@ -36,4 +36,41 @@ public interface PaymentInterface extends Remote {
 
     // Triggers Cristian physical clock synchronization on demand
     String synchronizeClock() throws RemoteException;
+
+    // Credit a user's wallet balance
+    String addFunds(
+        String userId,
+        double amount
+    ) throws RemoteException;
+
+    LamportResult<String> addFunds(
+        String userId,
+        double amount,
+        long clientLamport
+    ) throws RemoteException;
+
+    // Read-only wallet balance check
+    double getWalletBalance(
+        String userId
+    ) throws RemoteException;
+
+    LamportResult<Double> getWalletBalance(
+        String userId,
+        long clientLamport
+    ) throws RemoteException;
+
+    // Atomic check-and-deduct used by ChargingSession's mid-session billing cycle.
+    // Returns "OK|<newBalance>" or "INSUFFICIENT|<currentBalance>".
+    String checkAndDeductBalance(
+        String userId,
+        double amount,
+        String sessionId
+    ) throws RemoteException;
+
+    LamportResult<String> checkAndDeductBalance(
+        String userId,
+        double amount,
+        String sessionId,
+        long clientLamport
+    ) throws RemoteException;
 }

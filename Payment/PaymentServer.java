@@ -28,6 +28,7 @@ public class PaymentServer
 
     private HashMap<String, String> paymentStatus;
     private HashMap<String, String> paymentDetails;
+    private HashMap<String, Double> walletBalances;
     private int paymentCounter = 1001;
 
     private static final String STATION_ID = "S01";
@@ -56,6 +57,7 @@ public class PaymentServer
 
         paymentStatus = new HashMap<String, String>();
         paymentDetails = new HashMap<String, String>();
+        walletBalances = new HashMap<String, Double>();
 
         this.chargingSession = chargingSession;
         this.pricing = pricing;
@@ -84,6 +86,7 @@ public class PaymentServer
         try {
             this.dao = new PaymentDAO();
             dao.loadAllPayments(paymentStatus, paymentDetails);
+            dao.loadAllWallets(walletBalances);
             int maxCounter = dao.getMaxCounter();
             if (maxCounter >= paymentCounter) {
                 paymentCounter = maxCounter + 1;
@@ -424,6 +427,178 @@ public class PaymentServer
         }
     }
 
+    // =========================================================
+    // WALLET: ADD FUNDS (PRIMARY-only write)
+    // =========================================================
+
+    @Override
+    public String addFunds(String userId, double amount) throws RemoteException {
+        return addFunds(userId, amount, 0).getData();
+    }
+
+    @Override
+    public LamportResult<String> addFunds(
+            String userId,
+            double amount,
+            long clientLamport)
+            throws RemoteException {
+
+        long recvL = logicalClock.receiveEvent(clientLamport);
+        log("RECEIVE", "ADD FUNDS request received for User " + userId + ", Amount Rs. " + amount + " (Client Lamport: " + clientLamport + "). Clock updated to " + recvL);
+
+        if (rejectIfSecondary("addFunds")) {
+            long respL = logicalClock.sendEvent();
+            return new LamportResult<>("Add funds failed: this instance is SECONDARY. Route to PRIMARY.", respL);
+        }
+
+        if (userId == null || userId.length() == 0 || amount <= 0) {
+            log("LOCAL", "Add funds failed: invalid User ID or amount.");
+            long respL = logicalClock.sendEvent();
+            return new LamportResult<>("Add funds failed: invalid User ID or amount.", respL);
+        }
+
+        double newBalance;
+        synchronized (this) {
+            double current = walletBalances.getOrDefault(userId, 0.0);
+            newBalance = current + amount;
+            walletBalances.put(userId, newBalance);
+            logicalClock.tick();
+            log("LOCAL", "Wallet credited for User " + userId + ". New balance: Rs. " + newBalance);
+        }
+
+        persistWallet(userId, newBalance);
+        replicateWallet("WALLET_CREDIT", userId, amount, newBalance, null);
+
+        String result = "Funds added successfully. User: " + userId + ", Credited: Rs. " + amount + ", New Balance: Rs. " + newBalance;
+        long respL = logicalClock.sendEvent();
+        log("SEND", "Returning ADD FUNDS response to client (Lamport: " + respL + ")");
+        return new LamportResult<>(result, respL);
+    }
+
+    // =========================================================
+    // WALLET: GET BALANCE (read-only)
+    // =========================================================
+
+    @Override
+    public double getWalletBalance(String userId) throws RemoteException {
+        return getWalletBalance(userId, 0).getData();
+    }
+
+    @Override
+    public LamportResult<Double> getWalletBalance(
+            String userId,
+            long clientLamport)
+            throws RemoteException {
+
+        long recvL = logicalClock.receiveEvent(clientLamport);
+        log("RECEIVE", "GET WALLET BALANCE request for User " + userId + " received (Client Lamport: " + clientLamport + "). Clock updated to " + recvL);
+
+        synchronized (this) {
+            if (!walletBalances.containsKey(userId)) {
+                log("LOCAL", "Wallet not found in memory for User " + userId + ". Querying DB...");
+                if (dao != null) {
+                    try {
+                        Double dbBalance = dao.queryWalletBalance(userId);
+                        if (dbBalance != null) {
+                            logicalClock.tick();
+                            long respL = logicalClock.sendEvent();
+                            log("SEND", "Returning GET WALLET BALANCE response from DB (Lamport: " + respL + ")");
+                            return new LamportResult<>(dbBalance, respL);
+                        }
+                    } catch (Exception dbEx) {
+                        log("LOCAL", "[DB] WARNING: DB fallback query failed: " + dbEx.getMessage());
+                    }
+                }
+                long respL = logicalClock.sendEvent();
+                return new LamportResult<>(0.0, respL);
+            }
+
+            double balance = walletBalances.get(userId);
+            logicalClock.tick();
+            log("LOCAL", "User " + userId + " wallet balance: Rs. " + balance);
+
+            long respL = logicalClock.sendEvent();
+            log("SEND", "Returning GET WALLET BALANCE response (Lamport: " + respL + ")");
+            return new LamportResult<>(balance, respL);
+        }
+    }
+
+    // =========================================================
+    // WALLET: CHECK AND DEDUCT BALANCE (PRIMARY-only write)
+    // Called by ChargingSessionServer's periodic mid-session billing
+    // cycle -- this is the RMI call that crosses the ChargingSession
+    // container/JVM boundary into the Payment container/JVM.
+    // =========================================================
+
+    @Override
+    public String checkAndDeductBalance(String userId, double amount, String sessionId) throws RemoteException {
+        return checkAndDeductBalance(userId, amount, sessionId, 0).getData();
+    }
+
+    @Override
+    public LamportResult<String> checkAndDeductBalance(
+            String userId,
+            double amount,
+            String sessionId,
+            long clientLamport)
+            throws RemoteException {
+
+        long recvL = logicalClock.receiveEvent(clientLamport);
+        log("RECEIVE", "CHECK AND DEDUCT BALANCE request received for User " + userId + ", Session " + sessionId + ", Amount Rs. " + amount + " (Client Lamport: " + clientLamport + "). Clock updated to " + recvL);
+
+        if (rejectIfSecondary("checkAndDeductBalance")) {
+            long respL = logicalClock.sendEvent();
+            return new LamportResult<>("INSUFFICIENT|0.0", respL);
+        }
+
+        String result;
+        double resultingBalance;
+        synchronized (this) {
+            double current = walletBalances.getOrDefault(userId, 0.0);
+            if (current < amount) {
+                logicalClock.tick();
+                log("LOCAL", "INSUFFICIENT BALANCE for User " + userId + ", Session " + sessionId + ". Current: Rs. " + current + ", Required: Rs. " + amount);
+                resultingBalance = current;
+                result = "INSUFFICIENT|" + current;
+            } else {
+                resultingBalance = current - amount;
+                walletBalances.put(userId, resultingBalance);
+                logicalClock.tick();
+                log("LOCAL", "Wallet debited for User " + userId + ", Session " + sessionId + ". Deducted: Rs. " + amount + ", New Balance: Rs. " + resultingBalance);
+                result = "OK|" + resultingBalance;
+            }
+        }
+
+        if (result.startsWith("OK")) {
+            persistWallet(userId, resultingBalance);
+            replicateWallet("WALLET_DEBIT", userId, amount, resultingBalance, sessionId);
+        }
+
+        long respL = logicalClock.sendEvent();
+        log("SEND", "Returning CHECK AND DEDUCT BALANCE response to ChargingSessionServer (Lamport: " + respL + ")");
+        return new LamportResult<>(result, respL);
+    }
+
+    private void persistWallet(String userId, double newBalance) {
+        if (dao != null) {
+            try {
+                dao.upsertWalletBalance(userId, newBalance, PhysicalClock.getSynchronizedPhysicalTimeMillis());
+                log("LOCAL", "[DB] Wallet for User " + userId + " persisted to database.");
+            } catch (Exception dbEx) {
+                log("LOCAL", "[DB] WARNING: Failed to persist wallet for User " + userId + ": " + dbEx.getMessage());
+            }
+        }
+    }
+
+    private void replicateWallet(String opType, String userId, double amount, double newBalance, String sessionId) {
+        if (managerClient != null) {
+            StateDelta delta = (sessionId == null)
+                    ? new StateDelta(opType, userId, amount, newBalance)
+                    : new StateDelta(opType, userId, amount, newBalance, sessionId);
+            managerClient.replicate(identity.serviceName, identity.serverId, delta, logicalClock);
+        }
+    }
+
     private void persist(String paymentId, String sessionId, double energy, double amount) {
         if (dao != null) {
             try {
@@ -462,6 +637,18 @@ public class PaymentServer
             paymentDetails.put(paymentId, details);
             persist(paymentId, sessionId, energy, amount);
             log("LOCAL", "REPLICATION_APPLIED: payment " + paymentId);
+        } else if ("WALLET_CREDIT".equals(delta.opType) && delta.args.length == 3) {
+            String userId = (String) delta.args[0];
+            double newBalance = (Double) delta.args[2];
+            walletBalances.put(userId, newBalance);
+            persistWallet(userId, newBalance);
+            log("LOCAL", "REPLICATION_APPLIED: wallet credit for " + userId + ", New Balance: Rs. " + newBalance);
+        } else if ("WALLET_DEBIT".equals(delta.opType) && delta.args.length == 4) {
+            String userId = (String) delta.args[0];
+            double newBalance = (Double) delta.args[2];
+            walletBalances.put(userId, newBalance);
+            persistWallet(userId, newBalance);
+            log("LOCAL", "REPLICATION_APPLIED: wallet debit for " + userId + ", New Balance: Rs. " + newBalance);
         }
         long respL = logicalClock.sendEvent();
         return new LamportResult<>(true, respL);
@@ -473,6 +660,7 @@ public class PaymentServer
         GenericSnapshot snap = new GenericSnapshot();
         snap.put("paymentStatus", new HashMap<>(paymentStatus));
         snap.put("paymentDetails", new HashMap<>(paymentDetails));
+        snap.put("walletBalances", new HashMap<>(walletBalances));
         long respL = logicalClock.sendEvent();
         return new LamportResult<>(snap, respL);
     }
@@ -483,9 +671,12 @@ public class PaymentServer
         long recvL = logicalClock.receiveEvent(clientLamport);
         Map<String, String> restoredStatus = snapshot.get("paymentStatus");
         Map<String, String> restoredDetails = snapshot.get("paymentDetails");
+        Map<String, Double> restoredWallets = snapshot.get("walletBalances");
         if (restoredStatus != null) paymentStatus.putAll(restoredStatus);
         if (restoredDetails != null) paymentDetails.putAll(restoredDetails);
-        log("LOCAL", "FULL_SYNC_APPLIED: restored " + (restoredStatus == null ? 0 : restoredStatus.size()) + " payments.");
+        if (restoredWallets != null) walletBalances.putAll(restoredWallets);
+        log("LOCAL", "FULL_SYNC_APPLIED: restored " + (restoredStatus == null ? 0 : restoredStatus.size()) + " payments, "
+                + (restoredWallets == null ? 0 : restoredWallets.size()) + " wallets.");
         long respL = logicalClock.sendEvent();
         return new LamportResult<>(true, respL);
     }

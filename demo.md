@@ -103,7 +103,7 @@ New-Item -ItemType Directory bin | Out-Null
 javac -cp "lib\mysql-connector-j-8.0.33.jar" -d bin `
   Clock\*.java Common\*.java `
   ChargingStation\*.java Reservation\*.java ChargingSession\*.java Pricing\*.java Payment\*.java `
-  DBConnectionHelper.java EVClient.java MultithreadTest.java ReplicationTest.java tests\*.java
+  DBConnectionHelper.java EVClient.java MultithreadTest.java ReplicationTest.java WalletDemo.java tests\*.java
 
 $env:MANAGER_HOST="localhost"
 $env:MANAGER_PORT="1240"
@@ -357,6 +357,45 @@ docker compose logs charging-station-2 | Select-String "CRISTIAN" -Context 0,15
 
 ---
 
+## Step 13 — Wallet balance + cross-server Lamport clocks (ChargingSession <-> Payment)
+
+**Explanation:** every earlier Lamport example (Step 11) shows one server's clock advancing across its own log. This step demonstrates the same rule holding true across TWO INDEPENDENT CONTAINERS: `ChargingSessionServer` runs a background billing cycle (every 5s, no client involved) that calls `PaymentServer.checkAndDeductBalance` over RMI to bill the active session's owner for energy consumed since the last checkpoint. If the wallet balance runs out, ChargingSession automatically stops the session. The Lamport timestamp travels WITH the RMI call and response, so `payment-N`'s clock jumps to `max(its own, ChargingSession's sent value) + 1` on receipt — a live, repeatable, cross-container causal chain.
+
+Run the standalone demo (drives: top-up -> reserve -> start charging -> wait for auto-stop):
+
+```powershell
+java -cp "bin;lib\mysql-connector-j-8.0.33.jar" WalletDemo
+```
+
+While it runs, in a SEPARATE terminal, watch the two containers' logs live:
+
+```powershell
+docker compose logs charging-session-1 payment-1 -f
+```
+
+Or, after it finishes, pull the causal sequence out with:
+
+```powershell
+docker compose logs charging-session-1 payment-1 | Select-String "Lamport" | Select-Object -First 40
+docker compose logs charging-session-1 payment-1 | Select-String "WALLET|BILLING|INSUFFICIENT"
+```
+
+Expected pattern, repeating every ~5 seconds: `charging-session-1` logs `[Event=SEND]` with a Lamport value, `payment-1` logs `[Event=RECEIVE]` with a HIGHER Lamport value (the receive rule `max(local, received) + 1`), then `payment-1` logs `[Event=SEND]` with its own new value, then `charging-session-1` logs `[Event=RECEIVE]` with an even higher value — strictly increasing across the two containers every cycle, ending in `[Event=INSUFFICIENT_BALANCE]` once the small (Rs. 0.25) top-up is exhausted.
+
+**What to say:** "This is the only interaction in the whole system where a server calls another server on its own initiative, not because a client asked — so the Lamport handshake you're watching is happening completely independent of me clicking anything. And notice the actual charging duration and cost are still computed from `PhysicalClock`'s Cristian-synchronized time, not from these Lamport numbers — Lamport is strictly for proving the causal order of the SEND/RECEIVE pair, never for the money or time math."
+
+Replication check — confirm the wallet balance replicated identically to all 3 Payment instances:
+
+```powershell
+docker exec mysql-payment-1 mysql -uroot -pevroot -e "SELECT * FROM ev_payment_db.wallets;"
+docker exec mysql-payment-2 mysql -uroot -pevroot -e "SELECT * FROM ev_payment_db_2.wallets;"
+docker exec mysql-payment-3 mysql -uroot -pevroot -e "SELECT * FROM ev_payment_db_3.wallets;"
+```
+
+See [docs/WALLET.md](docs/WALLET.md) for the full write-up of why this demonstrates cross-server Lamport clocks, how it differs from physical time, and how replication/failover affects wallet state.
+
+---
+
 ## Cleanup (after the demo)
 
 ```powershell
@@ -381,3 +420,4 @@ docker compose down -v       # also wipes DB data (fresh empty run next time)
 | Multithreading / concurrency safety | Step 10 |
 | Lamport logical clocks | Step 11 |
 | Cristian physical clock sync | Step 12 |
+| Cross-server Lamport clocks (2 different containers) | Step 13 |

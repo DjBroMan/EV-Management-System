@@ -84,7 +84,9 @@ public class EVClient {
                 case 11: makePayment(sc); break;
                 case 12: checkPaymentStatus(sc); break;
                 case 13: viewPaymentDetails(sc); break;
-                case 14:
+                case 14: addFunds(sc); break;
+                case 15: checkWalletBalance(sc); break;
+                case 16:
                     System.out.println("Exiting EV Charging App...");
                     sc.close();
                     return;
@@ -113,7 +115,9 @@ public class EVClient {
         System.out.println("11. Make Payment");
         System.out.println("12. Check Payment Status");
         System.out.println("13. View Payment Details");
-        System.out.println("14. Exit");
+        System.out.println("14. Add Funds to Wallet");
+        System.out.println("15. Check Wallet Balance");
+        System.out.println("16. Exit");
         System.out.println("========================================");
     }
 
@@ -415,6 +419,46 @@ public class EVClient {
 
             System.out.println();
             System.out.println(res.getData());
+        } catch (Exception e) {
+            paymentUnavailable();
+        }
+    }
+
+    private static void addFunds(Scanner sc) {
+        String targetUser = promptWithDefault(sc, "Enter User ID", userId);
+        System.out.print("Enter Amount to Add: ");
+        double amount;
+        try {
+            amount = Double.parseDouble(sc.nextLine().trim());
+        } catch (NumberFormatException e) {
+            System.out.println("Invalid amount.");
+            return;
+        }
+
+        try {
+            PaymentInterface payment = lookupPayment();
+            long sendL = clientClock.sendEvent();
+            LamportResult<String> res = payment.addFunds(targetUser, amount, sendL);
+            clientClock.receiveEvent(res.getTimestamp());
+
+            System.out.println();
+            System.out.println(res.getData());
+        } catch (Exception e) {
+            paymentUnavailable();
+        }
+    }
+
+    private static void checkWalletBalance(Scanner sc) {
+        String targetUser = promptWithDefault(sc, "Enter User ID", userId);
+
+        try {
+            PaymentInterface payment = lookupPayment();
+            long sendL = clientClock.sendEvent();
+            LamportResult<Double> res = payment.getWalletBalance(targetUser, sendL);
+            clientClock.receiveEvent(res.getTimestamp());
+
+            System.out.println();
+            System.out.println("User: " + targetUser + " | Wallet Balance: Rs. " + res.getData());
         } catch (Exception e) {
             paymentUnavailable();
         }

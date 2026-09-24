@@ -146,4 +146,60 @@ public class PaymentDAO {
             }
         }
     }
+
+    // ----------------------------------------------------------------
+    // Wallet operations (ev_payment_db.wallets)
+    // ----------------------------------------------------------------
+
+    /**
+     * Loads all wallet balances into the provided in-memory map.
+     */
+    public void loadAllWallets(Map<String, Double> walletBalances) throws Exception {
+        String sql = "SELECT user_id, balance FROM wallets";
+        try (Connection conn = DBConnectionHelper.getConnection();
+             Statement  st   = conn.createStatement();
+             ResultSet  rs   = st.executeQuery(sql)) {
+            int count = 0;
+            while (rs.next()) {
+                walletBalances.put(rs.getString("user_id"), rs.getDouble("balance"));
+                count++;
+            }
+            System.out.println("[DB:" + SERVER_NAME + "] Loaded " + count
+                    + " wallet records.");
+        }
+    }
+
+    /**
+     * Inserts or updates a user's wallet balance.
+     *
+     * @param timestampMs PhysicalClock.getSynchronizedPhysicalTimeMillis()
+     */
+    public void upsertWalletBalance(String userId, double newBalance, long timestampMs)
+            throws Exception {
+        String sql = "INSERT INTO wallets (user_id, balance, last_updated) "
+                   + "VALUES (?, ?, ?) "
+                   + "ON DUPLICATE KEY UPDATE balance = VALUES(balance), "
+                   + "last_updated = VALUES(last_updated)";
+        try (Connection conn = DBConnectionHelper.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, userId);
+            ps.setDouble(2, newBalance);
+            ps.setTimestamp(3, new Timestamp(timestampMs));
+            ps.executeUpdate();
+        }
+    }
+
+    /**
+     * Queries the wallet balance for a single user. Returns null if not found.
+     */
+    public Double queryWalletBalance(String userId) throws Exception {
+        String sql = "SELECT balance FROM wallets WHERE user_id = ?";
+        try (Connection conn = DBConnectionHelper.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, userId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getDouble("balance") : null;
+            }
+        }
+    }
 }
